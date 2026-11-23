@@ -22,7 +22,12 @@ data class PackRegion(val id: String, val name: String, val group: String, val p
 }
 
 const val RELEASES = "https://github.com/benbishop028-arch/HeadUnitOrbis/releases/download"
-const val COUNTRY_RELEASES = "https://github.com/benbishop028-arch/Horizon-Maps/releases/download"
+/**
+ * Where the country packs are published: `BuildConfig.PACK_BASE_URL`, which a build can point at any other server (a CDN, a bucket,
+ * a mirror) with `-PpackBaseUrl=…`. It must serve the same layout GitHub's releases do: a `pack-<id>` folder per area, plain files
+ * with their size and last-modified date (the app HEADs them to tell whether a pack is out and to notice rebuilt map data).
+ */
+const val COUNTRY_RELEASES = BuildConfig.PACK_BASE_URL
 
 object PackRegions {
     fun idOf(path: String): String {

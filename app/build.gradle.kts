@@ -61,6 +61,12 @@ android {
         }
     }
     testOptions { unitTests.isReturnDefaultValues = true }
+    // Where the offline country packs are published. Each pack is a folder called pack-<id> under it, so the address is
+    // "<PACK_BASE_URL>/pack-<id>/<file>" and any plain file server with that layout works (a CDN, a bucket, a mirror).
+    // Set -PpackBaseUrl=https://packs.example.com to build against another server; the default is the GitHub releases
+    // the "Build country packs" workflow publishes to.
+    val packBaseUrl = (findProperty("packBaseUrl") as String?)?.trim()?.trimEnd('/')
+        ?: "https://github.com/benbishop028-arch/Horizon-Maps/releases/download"
     lint { checkReleaseBuilds = false; abortOnError = false }
     // The public flavor suffix gives the package ID com.headunit.nav.public, preserving update compatibility with existing releases.
     flavorDimensions += "key"
@@ -74,6 +80,8 @@ android {
             buildConfigField("String", "DEFAULT_MAP", "\"mapbox\"")
             // where the build's "publish" option puts new versions (the "app" release); the app checks it for updates
             buildConfigField("String", "UPDATE_REPO", "\"benbishop028-arch/Horizon-Maps\"")
+            // where the offline country packs are downloaded from (see packBaseUrl above)
+            buildConfigField("String", "PACK_BASE_URL", "\"$packBaseUrl\"")
             // the APK file the updater looks for in that release
             buildConfigField("String", "UPDATE_APK", "\"HorizonNav-public.apk\"")
             // the GitHub edition updates itself from GitHub
@@ -95,6 +103,8 @@ android {
             buildConfigField("String", "DEFAULT_MAP", "\"mapbox\"")
             // (kept for the feedback and issue links, which still go to GitHub)
             buildConfigField("String", "UPDATE_REPO", "\"benbishop028-arch/Horizon-Maps\"")
+            // where the offline country packs are downloaded from (see packBaseUrl above)
+            buildConfigField("String", "PACK_BASE_URL", "\"$packBaseUrl\"")
             buildConfigField("String", "UPDATE_APK", "\"\"")
             buildConfigField("Boolean", "SELF_UPDATE", "false")
             buildConfigField("String", "STORE", "\"play\"")
