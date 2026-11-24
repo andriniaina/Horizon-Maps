@@ -5,7 +5,7 @@ import java.util.Calendar
 
 /**
  * Details for the place preview card, from OpenStreetMap (free): opening hours, phone, website, the address, what kind of place it
- * is, and a charging station's plugs. One lookup when a place is opened (Overpass), nothing more.
+ * is. Charger details come from the downloaded pack instead.
  */
 class PlaceDetails(
     val kind: String,          // "fuel", "charging", "cafe", ... (the shortcut it matches), or ""
@@ -20,7 +20,7 @@ object PlaceInfo {
     /** The OpenStreetMap place at [p] best matching [name] (or the nearest shop or amenity for a dropped pin); null if none. */
     fun lookup(p: LL, name: String): PlaceDetails? {
         val q = String.format(java.util.Locale.US,
-            "[out:json][timeout:8];nwr(around:70,%.6f,%.6f)[~\"^(shop|amenity|tourism|leisure|office|craft|healthcare)$\"~\".\"];out tags center 25;", p.lat, p.lon)
+            "[out:json][timeout:8];nwr(around:70,%.6f,%.6f)[~\"^(shop|amenity|tourism|leisure|office|craft|healthcare)$\"~\".\"][\"amenity\"!=\"charging_station\"];out tags center 25;", p.lat, p.lon)
         val els = Overpass.query(q, 6000, 9000, 2)
         val want = norm(name)
         var best: JSONObject? = null
@@ -49,29 +49,17 @@ object PlaceInfo {
         val addr = listOf(listOf(t.optString("addr:housenumber"), t.optString("addr:street")).filter { it.isNotBlank() }.joinToString(" "),
             t.optString("addr:city").ifBlank { t.optString("addr:suburb") }, t.optString("addr:postcode")).filter { it.isNotBlank() }.joinToString(", ")
         return PlaceDetails(kindOf(t), t.optString("opening_hours").trim(), t.optString("phone").ifBlank { t.optString("contact:phone") }.substringBefore(';').trim(),
-            t.optString("website").ifBlank { t.optString("contact:website") }.substringBefore(';').trim(), addr, plugsOf(t))
+            t.optString("website").ifBlank { t.optString("contact:website") }.substringBefore(';').trim(), addr, emptyList())
     }
 
     private fun norm(s: String) = s.lowercase().replace(Regex("[^\\p{L}\\p{N}]+"), " ").trim()
 
     private fun kindOf(t: JSONObject): String = when (t.optString("amenity")) {
-        "fuel" -> "fuel"; "charging_station" -> "charging"; "cafe" -> "cafe"
+        "fuel" -> "fuel"; "cafe" -> "cafe"
         "restaurant", "fast_food", "pub", "bar", "food_court" -> "food"; "parking", "parking_entrance" -> "parking"; "toilets" -> "toilets"
         else -> ""
     }
 
-    private fun plugsOf(t: JSONObject): List<String> {
-        val names = listOf("type2_combo" to "CCS", "chademo" to "CHAdeMO", "type2" to "Type 2", "type2_cable" to "Type 2", "tesla_supercharger" to "Tesla",
-            "type1_combo" to "CCS1", "type1" to "Type 1", "nacs" to "NACS", "schuko" to "Schuko", "bs1363" to "3-pin")
-        val out = ArrayList<String>()
-        for ((k, label) in names) {
-            val n = t.optString("socket:$k").trim()
-            if (n.isEmpty() || n == "no" || n == "0") continue
-            val kw = t.optString("socket:$k:output").trim().ifBlank { "" }.replace("kW", " kW").replace("  ", " ")
-            out += label + (if (n.toIntOrNull() != null) " ×$n" else "") + (if (kw.isNotBlank()) " · $kw" else "")
-        }
-        return out.distinct()
-    }
 }
 
 /**

@@ -537,6 +537,7 @@ object TomTomRest {
         val d = if (x.has("dist")) x.optDouble("dist", 0.0) else Geo.dist(from, p)
         // chargers: the fastest power and the plug types ("350 kW · CCS, Type 2"), and the id for live availability
         var chargeId = ""
+        var plugs: List<String> = emptyList()
         if (kind == "charging") {
             chargeId = x.optJSONObject("dataSources")?.optJSONObject("chargingAvailability")?.optString("id").orEmpty()
             val cons = x.optJSONObject("chargingPark")?.optJSONArray("connectors")
@@ -551,20 +552,13 @@ object TomTomRest {
                 extra.clear()
                 if (kw > 0) extra += "${Math.round(kw)} kW"
                 if (types.isNotEmpty()) extra += types.take(3).joinToString(", ")
+                plugs = types.toList()
             }
         }
-        return Nearby(Place(name, street, p), d, extra.joinToString(" · "), chargeId = chargeId)
+        return Nearby(Place(name, street, p), d, extra.joinToString(" · "), chargeId = chargeId, plugs = plugs)
     }
 
-    private fun plugName(t: String): String? = when {
-        t.contains("Combo", true) || t.contains("CCS", true) -> "CCS"
-        t.contains("Chademo", true) -> "CHAdeMO"
-        t.contains("Type2", true) || t.contains("Type 2", true) -> "Type 2"
-        t.contains("Tesla", true) -> "Tesla"
-        t.contains("Type1", true) -> "Type 1"
-        t.isBlank() -> null
-        else -> null
-    }
+    private fun plugName(t: String): String? = Plugs.of(t)
 
     /**
      * Live availability at a charger (TomTom's EV charging availability, with your key): how many connectors are free and how many

@@ -348,10 +348,11 @@ jobs:
           def pt(g):
               c = g["coordinates"]
               if g["type"] == "Point": return c[1], c[0]
-              if g["type"] == "Polygon":
-                  r = c[0]; k = len(r) - 1 if len(r) > 1 else 1
-                  return sum(p[1] for p in r[:k]) / k, sum(p[0] for p in r[:k]) / k
-              return None
+              # (a charging station mapped as a building or a site: osmium gives a Polygon, or a MultiPolygon for a multipolygon relation)
+              rings = [c[0]] if g["type"] == "Polygon" else [poly[0] for poly in c] if g["type"] == "MultiPolygon" else None
+              if not rings: return None
+              r = max(rings, key=len); k = len(r) - 1 if len(r) > 1 else 1
+              return sum(p[1] for p in r[:k]) / k, sum(p[0] for p in r[:k]) / k
           def key(s): return "".join(ch.lower() if ch < "\x80" else ch for ch in s)
           with open("data/addr.geojsonseq", encoding="utf-8") as f, open("data/addr.unsorted", "w", encoding="utf-8") as out:
               for line in f:
@@ -552,19 +553,87 @@ jobs:
           ls -l data/cameras.tsv data/limits.bin
 
       # ---------------- publish ----------------
+      # ---------------- chargers (full builds and "extras only") ----------------
+      - name: Build the charger list
+        if: matrix.part == 'lists' || matrix.part == 'extras'
+        run: |
+          # every charging point, with the connectors it has, for the app's charging list and its connector filter with no signal
+          osmium tags-filter data/region.osm.pbf nwr/amenity=charging_station -o data/ev.osm.pbf --overwrite
+          osmium export data/ev.osm.pbf -f geojsonseq --geometry-types=point,polygon -o data/ev.geojsonseq --overwrite
+          rm -f data/ev.osm.pbf
+          python3 - <<'PY'
+          import json, math
+          PLUG = {"type2_combo": "CCS", "type1_combo": "CCS1", "chademo": "CHAdeMO", "type2": "Type 2", "type2_cable": "Type 2",
+                  "tesla_supercharger": "Tesla", "tesla_supercharger_ccs": "CCS", "nacs": "NACS", "type1": "Type 1",
+                  "schuko": "Schuko", "bs1363": "3-pin"}
+          def pt(g):
+              c = g.get("coordinates") if g else None
+              if not c: return None
+              if g["type"] == "Point": return c[1], c[0]
+              # (a charging station mapped as a building or a site: osmium gives a Polygon, or a MultiPolygon for a multipolygon relation)
+              rings = [c[0]] if g["type"] == "Polygon" else [poly[0] for poly in c] if g["type"] == "MultiPolygon" else None
+              if not rings: return None
+              r = max(rings, key=len); k = len(r) - 1 if len(r) > 1 else 1
+              return sum(p[1] for p in r[:k]) / k, sum(p[0] for p in r[:k]) / k
+          def clean(s): return (s or "").replace("\t", " ").replace("\n", " ").strip()
+          def out_kw(v):
+              t = clean(v).lower()
+              if not t: return 0.0
+              try: n = float("".join(ch for ch in t[:12] if ch.isdigit() or ch == ".") or 0)
+              except ValueError: return 0.0
+              # ("350 kW", "350kW", "350000 W" and a bare "350" all mean 350 kW)
+              return n / 1000.0 if ("w" in t and "kw" not in t and n > 1000) else n
+          n = 0
+          with open("data/ev.geojsonseq", encoding="utf-8") as f, open("data/chargers.unsorted", "w", encoding="utf-8") as o:
+              for line in f:
+                  line = line.lstrip("\x1e").strip()
+                  if not line: continue
+                  try: ft = json.loads(line)
+                  except Exception: continue
+                  pr = ft.get("properties") or {}
+                  # (osmium export also writes the ways and nodes a charging area is built from: only the station itself counts)
+                  if pr.get("amenity") != "charging_station": continue
+                  p = pt(ft.get("geometry"))
+                  if not p: continue
+                  lat, lon = p
+                  name = clean(pr.get("name") or pr.get("brand") or pr.get("operator")) or "Charging point"
+                  street = clean(pr.get("addr:street") or pr.get("operator"))
+                  plugs = []; kw = 0.0
+                  for k, v in pr.items():
+                      if not k.startswith("socket:") or k.count(":") != 1: continue
+                      v = clean(v)
+                      # ("no" and "0" say the station hasn't got that plug)
+                      if not v or v.lower() == "no" or v == "0": continue
+                      plug = PLUG.get(k[len("socket:"):])
+                      if plug and plug not in plugs: plugs += [plug]
+                      kw = max(kw, out_kw(pr.get(k + ":output") or pr.get("charging_station:output")))
+                  try: points = int(clean(pr.get("capacity")) or 0)
+                  except ValueError: points = 0
+                  # the zoom-15 tile first, so the app reads one tile's lines at a time (the same scheme as cameras.tsv)
+                  x = min(32767, max(0, int((lon + 180.0) / 360.0 * 32768)))
+                  r = math.radians(lat)
+                  y = min(32767, max(0, int((1.0 - math.log(math.tan(r) + 1.0 / math.cos(r)) / math.pi) / 2.0 * 32768)))
+                  o.write("%05d%05d\t%s\t%.6f\t%.6f\t%s\t%d\t%s\t%d\n" % (
+                      y, x, name, lat, lon, street, round(kw), "|".join(plugs), points)); n += 1
+          print("chargers", n)
+          PY
+          LC_ALL=C sort -S 1G -T data data/chargers.unsorted > data/chargers.tsv
+          rm -f data/chargers.unsorted data/ev.geojsonseq
+          ls -l data/chargers.tsv
+
       - name: Publish to the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           rm -f data/region.osm.pbf data/tz.sqlite
           # GitHub refuses release files of 2 GB or more, so a bigger file is cut into parts (the app joins them again)
-          for big in tiles.tar map.pmtiles addresses.tsv places.tsv names.idx; do
+          for big in tiles.tar map.pmtiles addresses.tsv places.tsv names.idx chargers.tsv; do
             if [ -f "data/$big" ] && [ "$(stat -c%s data/$big)" -gt 1900000000 ]; then
               split -b 1800M -d -a 2 "data/$big" "data/$big.part" && rm "data/$big"
             fi
           done
           FILES=""
-          for f in data/tiles.tar data/tiles.tar.part* data/admins.sqlite data/valhalla.json data/places.tsv data/places.tsv.part* data/names.idx data/names.idx.part* data/map.pmtiles data/map.pmtiles.part* data/fonts.zip data/addresses.tsv data/addresses.tsv.part* data/postcodes.tsv data/lamps.tsv data/signals.tsv data/cameras.tsv data/limits.bin; do
+          for f in data/tiles.tar data/tiles.tar.part* data/admins.sqlite data/valhalla.json data/places.tsv data/places.tsv.part* data/names.idx data/names.idx.part* data/map.pmtiles data/map.pmtiles.part* data/fonts.zip data/addresses.tsv data/addresses.tsv.part* data/postcodes.tsv data/lamps.tsv data/signals.tsv data/cameras.tsv data/limits.bin data/chargers.tsv data/chargers.tsv.part*; do
             # GitHub won't take an empty file (an area with no traffic lights mapped, say): the app copes without it
             [ -s "$f" ] && FILES="$FILES $f"
           done
@@ -572,6 +641,15 @@ jobs:
           # (in "extras only" mode just the speed limit and camera files are here: the rest of the release is left as it is)
           ls -l $FILES
           gh release upload "${{ matrix.area.tag }}" $FILES --repo "${{ github.repository }}" --clobber
+          # Publish the manifest last. It selects exactly one generation even if older assets remain.
+          if [ -s data/chargers.tsv ]; then
+            (cd data && sha256sum chargers.tsv > chargers.tsv.sha256)
+          elif [ -s data/chargers.tsv.part00 ]; then
+            (cd data && LC_ALL=C sha256sum chargers.tsv.part[0-9][0-9] > chargers.tsv.sha256)
+          fi
+          if [ -s data/chargers.tsv.sha256 ]; then
+            gh release upload "${{ matrix.area.tag }}" data/chargers.tsv.sha256 --repo "${{ github.repository }}" --clobber
+          fi
           echo "Download address: https://github.com/${{ github.repository }}/releases/download/${{ matrix.area.tag }}"
 
   build2:
@@ -790,10 +868,11 @@ jobs:
           def pt(g):
               c = g["coordinates"]
               if g["type"] == "Point": return c[1], c[0]
-              if g["type"] == "Polygon":
-                  r = c[0]; k = len(r) - 1 if len(r) > 1 else 1
-                  return sum(p[1] for p in r[:k]) / k, sum(p[0] for p in r[:k]) / k
-              return None
+              # (a charging station mapped as a building or a site: osmium gives a Polygon, or a MultiPolygon for a multipolygon relation)
+              rings = [c[0]] if g["type"] == "Polygon" else [poly[0] for poly in c] if g["type"] == "MultiPolygon" else None
+              if not rings: return None
+              r = max(rings, key=len); k = len(r) - 1 if len(r) > 1 else 1
+              return sum(p[1] for p in r[:k]) / k, sum(p[0] for p in r[:k]) / k
           def key(s): return "".join(ch.lower() if ch < "\x80" else ch for ch in s)
           with open("data/addr.geojsonseq", encoding="utf-8") as f, open("data/addr.unsorted", "w", encoding="utf-8") as out:
               for line in f:
@@ -994,19 +1073,87 @@ jobs:
           ls -l data/cameras.tsv data/limits.bin
 
       # ---------------- publish ----------------
+      # ---------------- chargers (full builds and "extras only") ----------------
+      - name: Build the charger list
+        if: matrix.part == 'lists' || matrix.part == 'extras'
+        run: |
+          # every charging point, with the connectors it has, for the app's charging list and its connector filter with no signal
+          osmium tags-filter data/region.osm.pbf nwr/amenity=charging_station -o data/ev.osm.pbf --overwrite
+          osmium export data/ev.osm.pbf -f geojsonseq --geometry-types=point,polygon -o data/ev.geojsonseq --overwrite
+          rm -f data/ev.osm.pbf
+          python3 - <<'PY'
+          import json, math
+          PLUG = {"type2_combo": "CCS", "type1_combo": "CCS1", "chademo": "CHAdeMO", "type2": "Type 2", "type2_cable": "Type 2",
+                  "tesla_supercharger": "Tesla", "tesla_supercharger_ccs": "CCS", "nacs": "NACS", "type1": "Type 1",
+                  "schuko": "Schuko", "bs1363": "3-pin"}
+          def pt(g):
+              c = g.get("coordinates") if g else None
+              if not c: return None
+              if g["type"] == "Point": return c[1], c[0]
+              # (a charging station mapped as a building or a site: osmium gives a Polygon, or a MultiPolygon for a multipolygon relation)
+              rings = [c[0]] if g["type"] == "Polygon" else [poly[0] for poly in c] if g["type"] == "MultiPolygon" else None
+              if not rings: return None
+              r = max(rings, key=len); k = len(r) - 1 if len(r) > 1 else 1
+              return sum(p[1] for p in r[:k]) / k, sum(p[0] for p in r[:k]) / k
+          def clean(s): return (s or "").replace("\t", " ").replace("\n", " ").strip()
+          def out_kw(v):
+              t = clean(v).lower()
+              if not t: return 0.0
+              try: n = float("".join(ch for ch in t[:12] if ch.isdigit() or ch == ".") or 0)
+              except ValueError: return 0.0
+              # ("350 kW", "350kW", "350000 W" and a bare "350" all mean 350 kW)
+              return n / 1000.0 if ("w" in t and "kw" not in t and n > 1000) else n
+          n = 0
+          with open("data/ev.geojsonseq", encoding="utf-8") as f, open("data/chargers.unsorted", "w", encoding="utf-8") as o:
+              for line in f:
+                  line = line.lstrip("\x1e").strip()
+                  if not line: continue
+                  try: ft = json.loads(line)
+                  except Exception: continue
+                  pr = ft.get("properties") or {}
+                  # (osmium export also writes the ways and nodes a charging area is built from: only the station itself counts)
+                  if pr.get("amenity") != "charging_station": continue
+                  p = pt(ft.get("geometry"))
+                  if not p: continue
+                  lat, lon = p
+                  name = clean(pr.get("name") or pr.get("brand") or pr.get("operator")) or "Charging point"
+                  street = clean(pr.get("addr:street") or pr.get("operator"))
+                  plugs = []; kw = 0.0
+                  for k, v in pr.items():
+                      if not k.startswith("socket:") or k.count(":") != 1: continue
+                      v = clean(v)
+                      # ("no" and "0" say the station hasn't got that plug)
+                      if not v or v.lower() == "no" or v == "0": continue
+                      plug = PLUG.get(k[len("socket:"):])
+                      if plug and plug not in plugs: plugs += [plug]
+                      kw = max(kw, out_kw(pr.get(k + ":output") or pr.get("charging_station:output")))
+                  try: points = int(clean(pr.get("capacity")) or 0)
+                  except ValueError: points = 0
+                  # the zoom-15 tile first, so the app reads one tile's lines at a time (the same scheme as cameras.tsv)
+                  x = min(32767, max(0, int((lon + 180.0) / 360.0 * 32768)))
+                  r = math.radians(lat)
+                  y = min(32767, max(0, int((1.0 - math.log(math.tan(r) + 1.0 / math.cos(r)) / math.pi) / 2.0 * 32768)))
+                  o.write("%05d%05d\t%s\t%.6f\t%.6f\t%s\t%d\t%s\t%d\n" % (
+                      y, x, name, lat, lon, street, round(kw), "|".join(plugs), points)); n += 1
+          print("chargers", n)
+          PY
+          LC_ALL=C sort -S 1G -T data data/chargers.unsorted > data/chargers.tsv
+          rm -f data/chargers.unsorted data/ev.geojsonseq
+          ls -l data/chargers.tsv
+
       - name: Publish to the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           rm -f data/region.osm.pbf data/tz.sqlite
           # GitHub refuses release files of 2 GB or more, so a bigger file is cut into parts (the app joins them again)
-          for big in tiles.tar map.pmtiles addresses.tsv places.tsv names.idx; do
+          for big in tiles.tar map.pmtiles addresses.tsv places.tsv names.idx chargers.tsv; do
             if [ -f "data/$big" ] && [ "$(stat -c%s data/$big)" -gt 1900000000 ]; then
               split -b 1800M -d -a 2 "data/$big" "data/$big.part" && rm "data/$big"
             fi
           done
           FILES=""
-          for f in data/tiles.tar data/tiles.tar.part* data/admins.sqlite data/valhalla.json data/places.tsv data/places.tsv.part* data/names.idx data/names.idx.part* data/map.pmtiles data/map.pmtiles.part* data/fonts.zip data/addresses.tsv data/addresses.tsv.part* data/postcodes.tsv data/lamps.tsv data/signals.tsv data/cameras.tsv data/limits.bin; do
+          for f in data/tiles.tar data/tiles.tar.part* data/admins.sqlite data/valhalla.json data/places.tsv data/places.tsv.part* data/names.idx data/names.idx.part* data/map.pmtiles data/map.pmtiles.part* data/fonts.zip data/addresses.tsv data/addresses.tsv.part* data/postcodes.tsv data/lamps.tsv data/signals.tsv data/cameras.tsv data/limits.bin data/chargers.tsv data/chargers.tsv.part*; do
             # GitHub won't take an empty file (an area with no traffic lights mapped, say): the app copes without it
             [ -s "$f" ] && FILES="$FILES $f"
           done
@@ -1014,6 +1161,15 @@ jobs:
           # (in "extras only" mode just the speed limit and camera files are here: the rest of the release is left as it is)
           ls -l $FILES
           gh release upload "${{ matrix.area.tag }}" $FILES --repo "${{ github.repository }}" --clobber
+          # Publish the manifest last. It selects exactly one generation even if older assets remain.
+          if [ -s data/chargers.tsv ]; then
+            (cd data && sha256sum chargers.tsv > chargers.tsv.sha256)
+          elif [ -s data/chargers.tsv.part00 ]; then
+            (cd data && LC_ALL=C sha256sum chargers.tsv.part[0-9][0-9] > chargers.tsv.sha256)
+          fi
+          if [ -s data/chargers.tsv.sha256 ]; then
+            gh release upload "${{ matrix.area.tag }}" data/chargers.tsv.sha256 --repo "${{ github.repository }}" --clobber
+          fi
           echo "Download address: https://github.com/${{ github.repository }}/releases/download/${{ matrix.area.tag }}"
 
   build3:
@@ -1232,10 +1388,11 @@ jobs:
           def pt(g):
               c = g["coordinates"]
               if g["type"] == "Point": return c[1], c[0]
-              if g["type"] == "Polygon":
-                  r = c[0]; k = len(r) - 1 if len(r) > 1 else 1
-                  return sum(p[1] for p in r[:k]) / k, sum(p[0] for p in r[:k]) / k
-              return None
+              # (a charging station mapped as a building or a site: osmium gives a Polygon, or a MultiPolygon for a multipolygon relation)
+              rings = [c[0]] if g["type"] == "Polygon" else [poly[0] for poly in c] if g["type"] == "MultiPolygon" else None
+              if not rings: return None
+              r = max(rings, key=len); k = len(r) - 1 if len(r) > 1 else 1
+              return sum(p[1] for p in r[:k]) / k, sum(p[0] for p in r[:k]) / k
           def key(s): return "".join(ch.lower() if ch < "\x80" else ch for ch in s)
           with open("data/addr.geojsonseq", encoding="utf-8") as f, open("data/addr.unsorted", "w", encoding="utf-8") as out:
               for line in f:
@@ -1436,19 +1593,87 @@ jobs:
           ls -l data/cameras.tsv data/limits.bin
 
       # ---------------- publish ----------------
+      # ---------------- chargers (full builds and "extras only") ----------------
+      - name: Build the charger list
+        if: matrix.part == 'lists' || matrix.part == 'extras'
+        run: |
+          # every charging point, with the connectors it has, for the app's charging list and its connector filter with no signal
+          osmium tags-filter data/region.osm.pbf nwr/amenity=charging_station -o data/ev.osm.pbf --overwrite
+          osmium export data/ev.osm.pbf -f geojsonseq --geometry-types=point,polygon -o data/ev.geojsonseq --overwrite
+          rm -f data/ev.osm.pbf
+          python3 - <<'PY'
+          import json, math
+          PLUG = {"type2_combo": "CCS", "type1_combo": "CCS1", "chademo": "CHAdeMO", "type2": "Type 2", "type2_cable": "Type 2",
+                  "tesla_supercharger": "Tesla", "tesla_supercharger_ccs": "CCS", "nacs": "NACS", "type1": "Type 1",
+                  "schuko": "Schuko", "bs1363": "3-pin"}
+          def pt(g):
+              c = g.get("coordinates") if g else None
+              if not c: return None
+              if g["type"] == "Point": return c[1], c[0]
+              # (a charging station mapped as a building or a site: osmium gives a Polygon, or a MultiPolygon for a multipolygon relation)
+              rings = [c[0]] if g["type"] == "Polygon" else [poly[0] for poly in c] if g["type"] == "MultiPolygon" else None
+              if not rings: return None
+              r = max(rings, key=len); k = len(r) - 1 if len(r) > 1 else 1
+              return sum(p[1] for p in r[:k]) / k, sum(p[0] for p in r[:k]) / k
+          def clean(s): return (s or "").replace("\t", " ").replace("\n", " ").strip()
+          def out_kw(v):
+              t = clean(v).lower()
+              if not t: return 0.0
+              try: n = float("".join(ch for ch in t[:12] if ch.isdigit() or ch == ".") or 0)
+              except ValueError: return 0.0
+              # ("350 kW", "350kW", "350000 W" and a bare "350" all mean 350 kW)
+              return n / 1000.0 if ("w" in t and "kw" not in t and n > 1000) else n
+          n = 0
+          with open("data/ev.geojsonseq", encoding="utf-8") as f, open("data/chargers.unsorted", "w", encoding="utf-8") as o:
+              for line in f:
+                  line = line.lstrip("\x1e").strip()
+                  if not line: continue
+                  try: ft = json.loads(line)
+                  except Exception: continue
+                  pr = ft.get("properties") or {}
+                  # (osmium export also writes the ways and nodes a charging area is built from: only the station itself counts)
+                  if pr.get("amenity") != "charging_station": continue
+                  p = pt(ft.get("geometry"))
+                  if not p: continue
+                  lat, lon = p
+                  name = clean(pr.get("name") or pr.get("brand") or pr.get("operator")) or "Charging point"
+                  street = clean(pr.get("addr:street") or pr.get("operator"))
+                  plugs = []; kw = 0.0
+                  for k, v in pr.items():
+                      if not k.startswith("socket:") or k.count(":") != 1: continue
+                      v = clean(v)
+                      # ("no" and "0" say the station hasn't got that plug)
+                      if not v or v.lower() == "no" or v == "0": continue
+                      plug = PLUG.get(k[len("socket:"):])
+                      if plug and plug not in plugs: plugs += [plug]
+                      kw = max(kw, out_kw(pr.get(k + ":output") or pr.get("charging_station:output")))
+                  try: points = int(clean(pr.get("capacity")) or 0)
+                  except ValueError: points = 0
+                  # the zoom-15 tile first, so the app reads one tile's lines at a time (the same scheme as cameras.tsv)
+                  x = min(32767, max(0, int((lon + 180.0) / 360.0 * 32768)))
+                  r = math.radians(lat)
+                  y = min(32767, max(0, int((1.0 - math.log(math.tan(r) + 1.0 / math.cos(r)) / math.pi) / 2.0 * 32768)))
+                  o.write("%05d%05d\t%s\t%.6f\t%.6f\t%s\t%d\t%s\t%d\n" % (
+                      y, x, name, lat, lon, street, round(kw), "|".join(plugs), points)); n += 1
+          print("chargers", n)
+          PY
+          LC_ALL=C sort -S 1G -T data data/chargers.unsorted > data/chargers.tsv
+          rm -f data/chargers.unsorted data/ev.geojsonseq
+          ls -l data/chargers.tsv
+
       - name: Publish to the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           rm -f data/region.osm.pbf data/tz.sqlite
           # GitHub refuses release files of 2 GB or more, so a bigger file is cut into parts (the app joins them again)
-          for big in tiles.tar map.pmtiles addresses.tsv places.tsv names.idx; do
+          for big in tiles.tar map.pmtiles addresses.tsv places.tsv names.idx chargers.tsv; do
             if [ -f "data/$big" ] && [ "$(stat -c%s data/$big)" -gt 1900000000 ]; then
               split -b 1800M -d -a 2 "data/$big" "data/$big.part" && rm "data/$big"
             fi
           done
           FILES=""
-          for f in data/tiles.tar data/tiles.tar.part* data/admins.sqlite data/valhalla.json data/places.tsv data/places.tsv.part* data/names.idx data/names.idx.part* data/map.pmtiles data/map.pmtiles.part* data/fonts.zip data/addresses.tsv data/addresses.tsv.part* data/postcodes.tsv data/lamps.tsv data/signals.tsv data/cameras.tsv data/limits.bin; do
+          for f in data/tiles.tar data/tiles.tar.part* data/admins.sqlite data/valhalla.json data/places.tsv data/places.tsv.part* data/names.idx data/names.idx.part* data/map.pmtiles data/map.pmtiles.part* data/fonts.zip data/addresses.tsv data/addresses.tsv.part* data/postcodes.tsv data/lamps.tsv data/signals.tsv data/cameras.tsv data/limits.bin data/chargers.tsv data/chargers.tsv.part*; do
             # GitHub won't take an empty file (an area with no traffic lights mapped, say): the app copes without it
             [ -s "$f" ] && FILES="$FILES $f"
           done
@@ -1456,6 +1681,15 @@ jobs:
           # (in "extras only" mode just the speed limit and camera files are here: the rest of the release is left as it is)
           ls -l $FILES
           gh release upload "${{ matrix.area.tag }}" $FILES --repo "${{ github.repository }}" --clobber
+          # Publish the manifest last. It selects exactly one generation even if older assets remain.
+          if [ -s data/chargers.tsv ]; then
+            (cd data && sha256sum chargers.tsv > chargers.tsv.sha256)
+          elif [ -s data/chargers.tsv.part00 ]; then
+            (cd data && LC_ALL=C sha256sum chargers.tsv.part[0-9][0-9] > chargers.tsv.sha256)
+          fi
+          if [ -s data/chargers.tsv.sha256 ]; then
+            gh release upload "${{ matrix.area.tag }}" data/chargers.tsv.sha256 --repo "${{ github.repository }}" --clobber
+          fi
           echo "Download address: https://github.com/${{ github.repository }}/releases/download/${{ matrix.area.tag }}"
 
   build4:
@@ -1674,10 +1908,11 @@ jobs:
           def pt(g):
               c = g["coordinates"]
               if g["type"] == "Point": return c[1], c[0]
-              if g["type"] == "Polygon":
-                  r = c[0]; k = len(r) - 1 if len(r) > 1 else 1
-                  return sum(p[1] for p in r[:k]) / k, sum(p[0] for p in r[:k]) / k
-              return None
+              # (a charging station mapped as a building or a site: osmium gives a Polygon, or a MultiPolygon for a multipolygon relation)
+              rings = [c[0]] if g["type"] == "Polygon" else [poly[0] for poly in c] if g["type"] == "MultiPolygon" else None
+              if not rings: return None
+              r = max(rings, key=len); k = len(r) - 1 if len(r) > 1 else 1
+              return sum(p[1] for p in r[:k]) / k, sum(p[0] for p in r[:k]) / k
           def key(s): return "".join(ch.lower() if ch < "\x80" else ch for ch in s)
           with open("data/addr.geojsonseq", encoding="utf-8") as f, open("data/addr.unsorted", "w", encoding="utf-8") as out:
               for line in f:
@@ -1878,19 +2113,87 @@ jobs:
           ls -l data/cameras.tsv data/limits.bin
 
       # ---------------- publish ----------------
+      # ---------------- chargers (full builds and "extras only") ----------------
+      - name: Build the charger list
+        if: matrix.part == 'lists' || matrix.part == 'extras'
+        run: |
+          # every charging point, with the connectors it has, for the app's charging list and its connector filter with no signal
+          osmium tags-filter data/region.osm.pbf nwr/amenity=charging_station -o data/ev.osm.pbf --overwrite
+          osmium export data/ev.osm.pbf -f geojsonseq --geometry-types=point,polygon -o data/ev.geojsonseq --overwrite
+          rm -f data/ev.osm.pbf
+          python3 - <<'PY'
+          import json, math
+          PLUG = {"type2_combo": "CCS", "type1_combo": "CCS1", "chademo": "CHAdeMO", "type2": "Type 2", "type2_cable": "Type 2",
+                  "tesla_supercharger": "Tesla", "tesla_supercharger_ccs": "CCS", "nacs": "NACS", "type1": "Type 1",
+                  "schuko": "Schuko", "bs1363": "3-pin"}
+          def pt(g):
+              c = g.get("coordinates") if g else None
+              if not c: return None
+              if g["type"] == "Point": return c[1], c[0]
+              # (a charging station mapped as a building or a site: osmium gives a Polygon, or a MultiPolygon for a multipolygon relation)
+              rings = [c[0]] if g["type"] == "Polygon" else [poly[0] for poly in c] if g["type"] == "MultiPolygon" else None
+              if not rings: return None
+              r = max(rings, key=len); k = len(r) - 1 if len(r) > 1 else 1
+              return sum(p[1] for p in r[:k]) / k, sum(p[0] for p in r[:k]) / k
+          def clean(s): return (s or "").replace("\t", " ").replace("\n", " ").strip()
+          def out_kw(v):
+              t = clean(v).lower()
+              if not t: return 0.0
+              try: n = float("".join(ch for ch in t[:12] if ch.isdigit() or ch == ".") or 0)
+              except ValueError: return 0.0
+              # ("350 kW", "350kW", "350000 W" and a bare "350" all mean 350 kW)
+              return n / 1000.0 if ("w" in t and "kw" not in t and n > 1000) else n
+          n = 0
+          with open("data/ev.geojsonseq", encoding="utf-8") as f, open("data/chargers.unsorted", "w", encoding="utf-8") as o:
+              for line in f:
+                  line = line.lstrip("\x1e").strip()
+                  if not line: continue
+                  try: ft = json.loads(line)
+                  except Exception: continue
+                  pr = ft.get("properties") or {}
+                  # (osmium export also writes the ways and nodes a charging area is built from: only the station itself counts)
+                  if pr.get("amenity") != "charging_station": continue
+                  p = pt(ft.get("geometry"))
+                  if not p: continue
+                  lat, lon = p
+                  name = clean(pr.get("name") or pr.get("brand") or pr.get("operator")) or "Charging point"
+                  street = clean(pr.get("addr:street") or pr.get("operator"))
+                  plugs = []; kw = 0.0
+                  for k, v in pr.items():
+                      if not k.startswith("socket:") or k.count(":") != 1: continue
+                      v = clean(v)
+                      # ("no" and "0" say the station hasn't got that plug)
+                      if not v or v.lower() == "no" or v == "0": continue
+                      plug = PLUG.get(k[len("socket:"):])
+                      if plug and plug not in plugs: plugs += [plug]
+                      kw = max(kw, out_kw(pr.get(k + ":output") or pr.get("charging_station:output")))
+                  try: points = int(clean(pr.get("capacity")) or 0)
+                  except ValueError: points = 0
+                  # the zoom-15 tile first, so the app reads one tile's lines at a time (the same scheme as cameras.tsv)
+                  x = min(32767, max(0, int((lon + 180.0) / 360.0 * 32768)))
+                  r = math.radians(lat)
+                  y = min(32767, max(0, int((1.0 - math.log(math.tan(r) + 1.0 / math.cos(r)) / math.pi) / 2.0 * 32768)))
+                  o.write("%05d%05d\t%s\t%.6f\t%.6f\t%s\t%d\t%s\t%d\n" % (
+                      y, x, name, lat, lon, street, round(kw), "|".join(plugs), points)); n += 1
+          print("chargers", n)
+          PY
+          LC_ALL=C sort -S 1G -T data data/chargers.unsorted > data/chargers.tsv
+          rm -f data/chargers.unsorted data/ev.geojsonseq
+          ls -l data/chargers.tsv
+
       - name: Publish to the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           rm -f data/region.osm.pbf data/tz.sqlite
           # GitHub refuses release files of 2 GB or more, so a bigger file is cut into parts (the app joins them again)
-          for big in tiles.tar map.pmtiles addresses.tsv places.tsv names.idx; do
+          for big in tiles.tar map.pmtiles addresses.tsv places.tsv names.idx chargers.tsv; do
             if [ -f "data/$big" ] && [ "$(stat -c%s data/$big)" -gt 1900000000 ]; then
               split -b 1800M -d -a 2 "data/$big" "data/$big.part" && rm "data/$big"
             fi
           done
           FILES=""
-          for f in data/tiles.tar data/tiles.tar.part* data/admins.sqlite data/valhalla.json data/places.tsv data/places.tsv.part* data/names.idx data/names.idx.part* data/map.pmtiles data/map.pmtiles.part* data/fonts.zip data/addresses.tsv data/addresses.tsv.part* data/postcodes.tsv data/lamps.tsv data/signals.tsv data/cameras.tsv data/limits.bin; do
+          for f in data/tiles.tar data/tiles.tar.part* data/admins.sqlite data/valhalla.json data/places.tsv data/places.tsv.part* data/names.idx data/names.idx.part* data/map.pmtiles data/map.pmtiles.part* data/fonts.zip data/addresses.tsv data/addresses.tsv.part* data/postcodes.tsv data/lamps.tsv data/signals.tsv data/cameras.tsv data/limits.bin data/chargers.tsv data/chargers.tsv.part*; do
             # GitHub won't take an empty file (an area with no traffic lights mapped, say): the app copes without it
             [ -s "$f" ] && FILES="$FILES $f"
           done
@@ -1898,4 +2201,13 @@ jobs:
           # (in "extras only" mode just the speed limit and camera files are here: the rest of the release is left as it is)
           ls -l $FILES
           gh release upload "${{ matrix.area.tag }}" $FILES --repo "${{ github.repository }}" --clobber
+          # Publish the manifest last. It selects exactly one generation even if older assets remain.
+          if [ -s data/chargers.tsv ]; then
+            (cd data && sha256sum chargers.tsv > chargers.tsv.sha256)
+          elif [ -s data/chargers.tsv.part00 ]; then
+            (cd data && LC_ALL=C sha256sum chargers.tsv.part[0-9][0-9] > chargers.tsv.sha256)
+          fi
+          if [ -s data/chargers.tsv.sha256 ]; then
+            gh release upload "${{ matrix.area.tag }}" data/chargers.tsv.sha256 --repo "${{ github.repository }}" --clobber
+          fi
           echo "Download address: https://github.com/${{ github.repository }}/releases/download/${{ matrix.area.tag }}"

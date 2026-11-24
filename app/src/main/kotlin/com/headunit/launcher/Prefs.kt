@@ -441,6 +441,10 @@ internal object PreferenceKeys {
     const val EV_PCT_CARD = "evpctcard"
     const val EV_CHARGE_PCT = "evcharge"
     const val EV_MIN_ARRIVE = "evminarr"
+    /** The car's own charger connectors, pipe-separated ("CCS|Type 2"). Empty = any connector, so nothing is filtered. */
+    const val EV_PLUGS = "evplugs"
+    /** Charge as late as the battery safely allows (15–25% on arrival) instead of stopping at the smallest detour. */
+    const val EV_LATE_CHARGE = "evlate"
 }
 
 /**

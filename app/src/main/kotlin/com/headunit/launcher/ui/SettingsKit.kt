@@ -17,7 +17,9 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material3.Icon
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -68,7 +70,7 @@ internal val LocalSettingHighlight = androidx.compose.runtime.compositionLocalOf
 /** One setting: a title (and an optional line under it) on the left, its control on the right. */
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
-internal fun SItem(title: String, sub: String? = null, onClick: (() -> Unit)? = null, trailing: @Composable () -> Unit = {}) {
+internal fun SItem(title: String, sub: String? = null, onClick: (() -> Unit)? = null, icon: androidx.compose.ui.graphics.vector.ImageVector? = null, iconTint: Color? = null, trailing: @Composable () -> Unit = {}) {
     val c = LocalVw.current
     // (the settings search names a setting in English: it matches here in whichever language the screen is in)
     val hl = LocalSettingHighlight.current?.let { it == title || L.t(it) == title } == true
@@ -89,9 +91,13 @@ internal fun SItem(title: String, sub: String? = null, onClick: (() -> Unit)? = 
     // title only while it keeps at least half the width; otherwise they go on their own line under it, wrapping if they need to)
     androidx.compose.ui.layout.Layout(
         content = {
-            Column {
-                Text(title, color = c.text, fontSize = 16.sp, fontWeight = FontWeight.Medium)
-                if (!sub.isNullOrBlank()) Text(sub, color = c.sub, fontSize = 12.sp, modifier = Modifier.padding(top = 2.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                // (a setting that is easier to spot with a picture beside it, as the sections are in Settings' list)
+                if (icon != null) IconBadge(icon, iconTint ?: c.accent, Modifier.padding(end = 14.dp), 38.dp)
+                Column {
+                    Text(title, color = c.text, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                    if (!sub.isNullOrBlank()) Text(sub, color = c.sub, fontSize = 12.sp, modifier = Modifier.padding(top = 2.dp))
+                }
             }
             androidx.compose.foundation.layout.FlowRow(
                 horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -141,9 +147,9 @@ internal fun SItemStacked(title: String, sub: String? = null, controls: @Composa
 
 /** An on/off setting stored under [key]. The whole row can be tapped. */
 @Composable
-internal fun SToggle(prefs: Prefs, title: String, key: String, def: Boolean, sub: String? = null) {
+internal fun SToggle(prefs: Prefs, title: String, key: String, def: Boolean, sub: String? = null, onChange: (() -> Unit)? = null) {
     val on = prefs.b(key, def)
-    SItem(title, sub, onClick = { prefs.put(key, !on) }) { Switch(on, { prefs.put(key, it) }) }
+    SItem(title, sub, onClick = { prefs.put(key, !on); onChange?.invoke() }) { Switch(on, { prefs.put(key, it); onChange?.invoke() }) }
 }
 
 /** A row of choices in a rounded track, with the chosen one filled. */
@@ -174,6 +180,39 @@ internal fun SChoice(title: String, options: List<Pair<String, String>>, value: 
     else Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
         SItem(title, sub)
         if (wrap) WrappedChoices(options, value, onPick) else Segmented(options, value, onPick)
+    }
+}
+
+/**
+ * A setting that takes any number of ticked choices, with each one's state shown by a tick ([SChoice] takes one). The
+ * ticked ones are saved as they're tapped, so leaving the screen never loses a change.
+ */
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@Composable
+internal fun SMultiChoice(title: String, options: List<Pair<String, String>>, picked: Set<String>, sub: String? = null,
+                          icon: androidx.compose.ui.graphics.vector.ImageVector? = null, iconTint: Color? = null,
+                          onPick: (Set<String>) -> Unit) {
+    val c = LocalVw.current
+    Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+        SItem(title, sub, icon = icon, iconTint = iconTint)
+        androidx.compose.foundation.layout.FlowRow(
+            Modifier.padding(top = 8.dp, bottom = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            for ((k, label) in options) {
+                val on = k in picked
+                Row(
+                    Modifier.clip(RoundedCornerShape(50)).background(if (on) c.accent else c.tile)
+                        .clickable { onPick(if (on) picked - k else picked + k) }.padding(horizontal = 14.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (on) Icon(Icons.Rounded.Check, null,
+                        tint = if (c.accent.luminance() > 0.6f) Color(0xFF10131C) else Color.White, modifier = Modifier.size(16.dp).padding(end = 4.dp))
+                    Text(label, color = if (on) (if (c.accent.luminance() > 0.6f) Color(0xFF10131C) else Color.White) else c.text,
+                        fontSize = 14.sp, fontWeight = if (on) FontWeight.SemiBold else FontWeight.Medium, maxLines = 1)
+                }
+            }
+        }
     }
 }
 
