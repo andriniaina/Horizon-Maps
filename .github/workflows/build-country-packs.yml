@@ -552,6 +552,76 @@ jobs:
           ls -l data/cameras.tsv data/limits.bin
 
       # ---------------- publish ----------------
+      # ---------------- chargers (full builds and "extras only") ----------------
+      - name: Build the charger list
+        if: matrix.part == 'lists' || matrix.part == 'extras'
+        run: |
+          # every charging point, with the connectors it has, for the app's charging list and its connector filter with no signal
+          osmium tags-filter data/region.osm.pbf nwr/amenity=charging_station -o data/ev.osm.pbf --overwrite
+          osmium export data/ev.osm.pbf -f geojsonseq --geometry-types=point,polygon -o data/ev.geojsonseq --overwrite
+          rm -f data/ev.osm.pbf
+          python3 - <<'PY'
+          import json, math
+          PLUG = {"type2_combo": "CCS", "type1_combo": "CCS1", "chademo": "CHAdeMO", "type2": "Type 2", "type2_cable": "Type 2",
+                  "tesla_supercharger": "Tesla", "tesla_supercharger_ccs": "CCS", "nacs": "NACS", "type1": "Type 1",
+                  "schuko": "Schuko", "bs1363": "3-pin"}
+          def pt(g):
+              c = g.get("coordinates") if g else None
+              if not c: return None
+              if g["type"] == "Point": return c[1], c[0]
+              # (a charging station mapped as a building or a site: osmium gives a Polygon, or a MultiPolygon for a multipolygon relation)
+              rings = [c[0]] if g["type"] == "Polygon" else [poly[0] for poly in c] if g["type"] == "MultiPolygon" else None
+              if not rings: return None
+              r = max(rings, key=len); k = len(r) - 1 if len(r) > 1 else 1
+              return sum(p[1] for p in r[:k]) / k, sum(p[0] for p in r[:k]) / k
+          def clean(s): return (s or "").replace("\t", " ").replace("\n", " ").strip()
+          def out_kw(v):
+              t = clean(v).lower()
+              if not t: return 0.0
+              try: n = float("".join(ch for ch in t[:12] if ch.isdigit() or ch == ".") or 0)
+              except ValueError: return 0.0
+              # ("350 kW", "350kW", "350000 W" and a bare "350" all mean 350 kW)
+              return n / 1000.0 if ("w" in t and "kw" not in t and n > 1000) else n
+          n = 0
+          with open("data/ev.geojsonseq", encoding="utf-8") as f, open("data/chargers.unsorted", "w", encoding="utf-8") as o:
+              for line in f:
+                  line = line.lstrip("\x1e").strip()
+                  if not line: continue
+                  try: ft = json.loads(line)
+                  except Exception: continue
+                  pr = ft.get("properties") or {}
+                  # (osmium export also writes the ways and nodes a charging area is built from: only the station itself counts)
+                  if pr.get("amenity") != "charging_station": continue
+                  p = pt(ft.get("geometry"))
+                  if not p: continue
+                  lat, lon = p
+                  name = clean(pr.get("name") or pr.get("brand") or pr.get("operator")) or "Charging point"
+                  street = clean(pr.get("addr:street") or pr.get("operator"))
+                  plugs = []; kw = 0.0
+                  for k, v in pr.items():
+                      if not k.startswith("socket:") or k.count(":") != 1: continue
+                      v = clean(v)
+                      # ("no" and "0" say the station hasn't got that plug)
+                      if not v or v.lower() == "no" or v == "0": continue
+                      plug = PLUG.get(k[len("socket:"):])
+                      if plug and plug not in plugs: plugs += [plug]
+                      kw = max(kw, out_kw(pr.get(k + ":output") or pr.get("charging_station:output")))
+                  try: points = int(clean(pr.get("capacity")) or 0)
+                  except ValueError: points = 0
+                  # the zoom-15 tile first, so the app reads one tile's lines at a time (the same scheme as cameras.tsv)
+                  x = min(32767, max(0, int((lon + 180.0) / 360.0 * 32768)))
+                  r = math.radians(lat)
+                  y = min(32767, max(0, int((1.0 - math.log(math.tan(r) + 1.0 / math.cos(r)) / math.pi) / 2.0 * 32768)))
+                  o.write("%05d%05d\t%s\t%.6f\t%.6f\t%s\t%d\t%s\t%d\n" % (
+                      y, x, name, lat, lon, street, round(kw), "|".join(plugs), points)); n += 1
+          print("chargers", n)
+          PY
+          LC_ALL=C sort -S 1G -T data data/chargers.unsorted > data/chargers.candidate
+          rm -f data/chargers.unsorted data/ev.geojsonseq
+          cmp -s data/chargers.candidate data/chargers.tsv && echo "chargers.tsv unchanged" || mv data/chargers.candidate data/chargers.tsv
+          rm -f data/chargers.candidate
+          ls -l data/chargers.tsv
+
       - name: Publish to the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -564,7 +634,7 @@ jobs:
             fi
           done
           FILES=""
-          for f in data/tiles.tar data/tiles.tar.part* data/admins.sqlite data/valhalla.json data/places.tsv data/places.tsv.part* data/names.idx data/names.idx.part* data/map.pmtiles data/map.pmtiles.part* data/fonts.zip data/addresses.tsv data/addresses.tsv.part* data/postcodes.tsv data/lamps.tsv data/signals.tsv data/cameras.tsv data/limits.bin; do
+          for f in data/tiles.tar data/tiles.tar.part* data/admins.sqlite data/valhalla.json data/places.tsv data/places.tsv.part* data/names.idx data/names.idx.part* data/map.pmtiles data/map.pmtiles.part* data/fonts.zip data/addresses.tsv data/addresses.tsv.part* data/postcodes.tsv data/lamps.tsv data/signals.tsv data/cameras.tsv data/limits.bin data/chargers.tsv; do
             # GitHub won't take an empty file (an area with no traffic lights mapped, say): the app copes without it
             [ -s "$f" ] && FILES="$FILES $f"
           done
@@ -994,6 +1064,76 @@ jobs:
           ls -l data/cameras.tsv data/limits.bin
 
       # ---------------- publish ----------------
+      # ---------------- chargers (full builds and "extras only") ----------------
+      - name: Build the charger list
+        if: matrix.part == 'lists' || matrix.part == 'extras'
+        run: |
+          # every charging point, with the connectors it has, for the app's charging list and its connector filter with no signal
+          osmium tags-filter data/region.osm.pbf nwr/amenity=charging_station -o data/ev.osm.pbf --overwrite
+          osmium export data/ev.osm.pbf -f geojsonseq --geometry-types=point,polygon -o data/ev.geojsonseq --overwrite
+          rm -f data/ev.osm.pbf
+          python3 - <<'PY'
+          import json, math
+          PLUG = {"type2_combo": "CCS", "type1_combo": "CCS1", "chademo": "CHAdeMO", "type2": "Type 2", "type2_cable": "Type 2",
+                  "tesla_supercharger": "Tesla", "tesla_supercharger_ccs": "CCS", "nacs": "NACS", "type1": "Type 1",
+                  "schuko": "Schuko", "bs1363": "3-pin"}
+          def pt(g):
+              c = g.get("coordinates") if g else None
+              if not c: return None
+              if g["type"] == "Point": return c[1], c[0]
+              # (a charging station mapped as a building or a site: osmium gives a Polygon, or a MultiPolygon for a multipolygon relation)
+              rings = [c[0]] if g["type"] == "Polygon" else [poly[0] for poly in c] if g["type"] == "MultiPolygon" else None
+              if not rings: return None
+              r = max(rings, key=len); k = len(r) - 1 if len(r) > 1 else 1
+              return sum(p[1] for p in r[:k]) / k, sum(p[0] for p in r[:k]) / k
+          def clean(s): return (s or "").replace("\t", " ").replace("\n", " ").strip()
+          def out_kw(v):
+              t = clean(v).lower()
+              if not t: return 0.0
+              try: n = float("".join(ch for ch in t[:12] if ch.isdigit() or ch == ".") or 0)
+              except ValueError: return 0.0
+              # ("350 kW", "350kW", "350000 W" and a bare "350" all mean 350 kW)
+              return n / 1000.0 if ("w" in t and "kw" not in t and n > 1000) else n
+          n = 0
+          with open("data/ev.geojsonseq", encoding="utf-8") as f, open("data/chargers.unsorted", "w", encoding="utf-8") as o:
+              for line in f:
+                  line = line.lstrip("\x1e").strip()
+                  if not line: continue
+                  try: ft = json.loads(line)
+                  except Exception: continue
+                  pr = ft.get("properties") or {}
+                  # (osmium export also writes the ways and nodes a charging area is built from: only the station itself counts)
+                  if pr.get("amenity") != "charging_station": continue
+                  p = pt(ft.get("geometry"))
+                  if not p: continue
+                  lat, lon = p
+                  name = clean(pr.get("name") or pr.get("brand") or pr.get("operator")) or "Charging point"
+                  street = clean(pr.get("addr:street") or pr.get("operator"))
+                  plugs = []; kw = 0.0
+                  for k, v in pr.items():
+                      if not k.startswith("socket:") or k.count(":") != 1: continue
+                      v = clean(v)
+                      # ("no" and "0" say the station hasn't got that plug)
+                      if not v or v.lower() == "no" or v == "0": continue
+                      plug = PLUG.get(k[len("socket:"):])
+                      if plug and plug not in plugs: plugs += [plug]
+                      kw = max(kw, out_kw(pr.get(k + ":output") or pr.get("charging_station:output")))
+                  try: points = int(clean(pr.get("capacity")) or 0)
+                  except ValueError: points = 0
+                  # the zoom-15 tile first, so the app reads one tile's lines at a time (the same scheme as cameras.tsv)
+                  x = min(32767, max(0, int((lon + 180.0) / 360.0 * 32768)))
+                  r = math.radians(lat)
+                  y = min(32767, max(0, int((1.0 - math.log(math.tan(r) + 1.0 / math.cos(r)) / math.pi) / 2.0 * 32768)))
+                  o.write("%05d%05d\t%s\t%.6f\t%.6f\t%s\t%d\t%s\t%d\n" % (
+                      y, x, name, lat, lon, street, round(kw), "|".join(plugs), points)); n += 1
+          print("chargers", n)
+          PY
+          LC_ALL=C sort -S 1G -T data data/chargers.unsorted > data/chargers.candidate
+          rm -f data/chargers.unsorted data/ev.geojsonseq
+          cmp -s data/chargers.candidate data/chargers.tsv && echo "chargers.tsv unchanged" || mv data/chargers.candidate data/chargers.tsv
+          rm -f data/chargers.candidate
+          ls -l data/chargers.tsv
+
       - name: Publish to the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1006,7 +1146,7 @@ jobs:
             fi
           done
           FILES=""
-          for f in data/tiles.tar data/tiles.tar.part* data/admins.sqlite data/valhalla.json data/places.tsv data/places.tsv.part* data/names.idx data/names.idx.part* data/map.pmtiles data/map.pmtiles.part* data/fonts.zip data/addresses.tsv data/addresses.tsv.part* data/postcodes.tsv data/lamps.tsv data/signals.tsv data/cameras.tsv data/limits.bin; do
+          for f in data/tiles.tar data/tiles.tar.part* data/admins.sqlite data/valhalla.json data/places.tsv data/places.tsv.part* data/names.idx data/names.idx.part* data/map.pmtiles data/map.pmtiles.part* data/fonts.zip data/addresses.tsv data/addresses.tsv.part* data/postcodes.tsv data/lamps.tsv data/signals.tsv data/cameras.tsv data/limits.bin data/chargers.tsv; do
             # GitHub won't take an empty file (an area with no traffic lights mapped, say): the app copes without it
             [ -s "$f" ] && FILES="$FILES $f"
           done
@@ -1436,6 +1576,76 @@ jobs:
           ls -l data/cameras.tsv data/limits.bin
 
       # ---------------- publish ----------------
+      # ---------------- chargers (full builds and "extras only") ----------------
+      - name: Build the charger list
+        if: matrix.part == 'lists' || matrix.part == 'extras'
+        run: |
+          # every charging point, with the connectors it has, for the app's charging list and its connector filter with no signal
+          osmium tags-filter data/region.osm.pbf nwr/amenity=charging_station -o data/ev.osm.pbf --overwrite
+          osmium export data/ev.osm.pbf -f geojsonseq --geometry-types=point,polygon -o data/ev.geojsonseq --overwrite
+          rm -f data/ev.osm.pbf
+          python3 - <<'PY'
+          import json, math
+          PLUG = {"type2_combo": "CCS", "type1_combo": "CCS1", "chademo": "CHAdeMO", "type2": "Type 2", "type2_cable": "Type 2",
+                  "tesla_supercharger": "Tesla", "tesla_supercharger_ccs": "CCS", "nacs": "NACS", "type1": "Type 1",
+                  "schuko": "Schuko", "bs1363": "3-pin"}
+          def pt(g):
+              c = g.get("coordinates") if g else None
+              if not c: return None
+              if g["type"] == "Point": return c[1], c[0]
+              # (a charging station mapped as a building or a site: osmium gives a Polygon, or a MultiPolygon for a multipolygon relation)
+              rings = [c[0]] if g["type"] == "Polygon" else [poly[0] for poly in c] if g["type"] == "MultiPolygon" else None
+              if not rings: return None
+              r = max(rings, key=len); k = len(r) - 1 if len(r) > 1 else 1
+              return sum(p[1] for p in r[:k]) / k, sum(p[0] for p in r[:k]) / k
+          def clean(s): return (s or "").replace("\t", " ").replace("\n", " ").strip()
+          def out_kw(v):
+              t = clean(v).lower()
+              if not t: return 0.0
+              try: n = float("".join(ch for ch in t[:12] if ch.isdigit() or ch == ".") or 0)
+              except ValueError: return 0.0
+              # ("350 kW", "350kW", "350000 W" and a bare "350" all mean 350 kW)
+              return n / 1000.0 if ("w" in t and "kw" not in t and n > 1000) else n
+          n = 0
+          with open("data/ev.geojsonseq", encoding="utf-8") as f, open("data/chargers.unsorted", "w", encoding="utf-8") as o:
+              for line in f:
+                  line = line.lstrip("\x1e").strip()
+                  if not line: continue
+                  try: ft = json.loads(line)
+                  except Exception: continue
+                  pr = ft.get("properties") or {}
+                  # (osmium export also writes the ways and nodes a charging area is built from: only the station itself counts)
+                  if pr.get("amenity") != "charging_station": continue
+                  p = pt(ft.get("geometry"))
+                  if not p: continue
+                  lat, lon = p
+                  name = clean(pr.get("name") or pr.get("brand") or pr.get("operator")) or "Charging point"
+                  street = clean(pr.get("addr:street") or pr.get("operator"))
+                  plugs = []; kw = 0.0
+                  for k, v in pr.items():
+                      if not k.startswith("socket:") or k.count(":") != 1: continue
+                      v = clean(v)
+                      # ("no" and "0" say the station hasn't got that plug)
+                      if not v or v.lower() == "no" or v == "0": continue
+                      plug = PLUG.get(k[len("socket:"):])
+                      if plug and plug not in plugs: plugs += [plug]
+                      kw = max(kw, out_kw(pr.get(k + ":output") or pr.get("charging_station:output")))
+                  try: points = int(clean(pr.get("capacity")) or 0)
+                  except ValueError: points = 0
+                  # the zoom-15 tile first, so the app reads one tile's lines at a time (the same scheme as cameras.tsv)
+                  x = min(32767, max(0, int((lon + 180.0) / 360.0 * 32768)))
+                  r = math.radians(lat)
+                  y = min(32767, max(0, int((1.0 - math.log(math.tan(r) + 1.0 / math.cos(r)) / math.pi) / 2.0 * 32768)))
+                  o.write("%05d%05d\t%s\t%.6f\t%.6f\t%s\t%d\t%s\t%d\n" % (
+                      y, x, name, lat, lon, street, round(kw), "|".join(plugs), points)); n += 1
+          print("chargers", n)
+          PY
+          LC_ALL=C sort -S 1G -T data data/chargers.unsorted > data/chargers.candidate
+          rm -f data/chargers.unsorted data/ev.geojsonseq
+          cmp -s data/chargers.candidate data/chargers.tsv && echo "chargers.tsv unchanged" || mv data/chargers.candidate data/chargers.tsv
+          rm -f data/chargers.candidate
+          ls -l data/chargers.tsv
+
       - name: Publish to the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1448,7 +1658,7 @@ jobs:
             fi
           done
           FILES=""
-          for f in data/tiles.tar data/tiles.tar.part* data/admins.sqlite data/valhalla.json data/places.tsv data/places.tsv.part* data/names.idx data/names.idx.part* data/map.pmtiles data/map.pmtiles.part* data/fonts.zip data/addresses.tsv data/addresses.tsv.part* data/postcodes.tsv data/lamps.tsv data/signals.tsv data/cameras.tsv data/limits.bin; do
+          for f in data/tiles.tar data/tiles.tar.part* data/admins.sqlite data/valhalla.json data/places.tsv data/places.tsv.part* data/names.idx data/names.idx.part* data/map.pmtiles data/map.pmtiles.part* data/fonts.zip data/addresses.tsv data/addresses.tsv.part* data/postcodes.tsv data/lamps.tsv data/signals.tsv data/cameras.tsv data/limits.bin data/chargers.tsv; do
             # GitHub won't take an empty file (an area with no traffic lights mapped, say): the app copes without it
             [ -s "$f" ] && FILES="$FILES $f"
           done
@@ -1878,6 +2088,76 @@ jobs:
           ls -l data/cameras.tsv data/limits.bin
 
       # ---------------- publish ----------------
+      # ---------------- chargers (full builds and "extras only") ----------------
+      - name: Build the charger list
+        if: matrix.part == 'lists' || matrix.part == 'extras'
+        run: |
+          # every charging point, with the connectors it has, for the app's charging list and its connector filter with no signal
+          osmium tags-filter data/region.osm.pbf nwr/amenity=charging_station -o data/ev.osm.pbf --overwrite
+          osmium export data/ev.osm.pbf -f geojsonseq --geometry-types=point,polygon -o data/ev.geojsonseq --overwrite
+          rm -f data/ev.osm.pbf
+          python3 - <<'PY'
+          import json, math
+          PLUG = {"type2_combo": "CCS", "type1_combo": "CCS1", "chademo": "CHAdeMO", "type2": "Type 2", "type2_cable": "Type 2",
+                  "tesla_supercharger": "Tesla", "tesla_supercharger_ccs": "CCS", "nacs": "NACS", "type1": "Type 1",
+                  "schuko": "Schuko", "bs1363": "3-pin"}
+          def pt(g):
+              c = g.get("coordinates") if g else None
+              if not c: return None
+              if g["type"] == "Point": return c[1], c[0]
+              # (a charging station mapped as a building or a site: osmium gives a Polygon, or a MultiPolygon for a multipolygon relation)
+              rings = [c[0]] if g["type"] == "Polygon" else [poly[0] for poly in c] if g["type"] == "MultiPolygon" else None
+              if not rings: return None
+              r = max(rings, key=len); k = len(r) - 1 if len(r) > 1 else 1
+              return sum(p[1] for p in r[:k]) / k, sum(p[0] for p in r[:k]) / k
+          def clean(s): return (s or "").replace("\t", " ").replace("\n", " ").strip()
+          def out_kw(v):
+              t = clean(v).lower()
+              if not t: return 0.0
+              try: n = float("".join(ch for ch in t[:12] if ch.isdigit() or ch == ".") or 0)
+              except ValueError: return 0.0
+              # ("350 kW", "350kW", "350000 W" and a bare "350" all mean 350 kW)
+              return n / 1000.0 if ("w" in t and "kw" not in t and n > 1000) else n
+          n = 0
+          with open("data/ev.geojsonseq", encoding="utf-8") as f, open("data/chargers.unsorted", "w", encoding="utf-8") as o:
+              for line in f:
+                  line = line.lstrip("\x1e").strip()
+                  if not line: continue
+                  try: ft = json.loads(line)
+                  except Exception: continue
+                  pr = ft.get("properties") or {}
+                  # (osmium export also writes the ways and nodes a charging area is built from: only the station itself counts)
+                  if pr.get("amenity") != "charging_station": continue
+                  p = pt(ft.get("geometry"))
+                  if not p: continue
+                  lat, lon = p
+                  name = clean(pr.get("name") or pr.get("brand") or pr.get("operator")) or "Charging point"
+                  street = clean(pr.get("addr:street") or pr.get("operator"))
+                  plugs = []; kw = 0.0
+                  for k, v in pr.items():
+                      if not k.startswith("socket:") or k.count(":") != 1: continue
+                      v = clean(v)
+                      # ("no" and "0" say the station hasn't got that plug)
+                      if not v or v.lower() == "no" or v == "0": continue
+                      plug = PLUG.get(k[len("socket:"):])
+                      if plug and plug not in plugs: plugs += [plug]
+                      kw = max(kw, out_kw(pr.get(k + ":output") or pr.get("charging_station:output")))
+                  try: points = int(clean(pr.get("capacity")) or 0)
+                  except ValueError: points = 0
+                  # the zoom-15 tile first, so the app reads one tile's lines at a time (the same scheme as cameras.tsv)
+                  x = min(32767, max(0, int((lon + 180.0) / 360.0 * 32768)))
+                  r = math.radians(lat)
+                  y = min(32767, max(0, int((1.0 - math.log(math.tan(r) + 1.0 / math.cos(r)) / math.pi) / 2.0 * 32768)))
+                  o.write("%05d%05d\t%s\t%.6f\t%.6f\t%s\t%d\t%s\t%d\n" % (
+                      y, x, name, lat, lon, street, round(kw), "|".join(plugs), points)); n += 1
+          print("chargers", n)
+          PY
+          LC_ALL=C sort -S 1G -T data data/chargers.unsorted > data/chargers.candidate
+          rm -f data/chargers.unsorted data/ev.geojsonseq
+          cmp -s data/chargers.candidate data/chargers.tsv && echo "chargers.tsv unchanged" || mv data/chargers.candidate data/chargers.tsv
+          rm -f data/chargers.candidate
+          ls -l data/chargers.tsv
+
       - name: Publish to the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1890,7 +2170,7 @@ jobs:
             fi
           done
           FILES=""
-          for f in data/tiles.tar data/tiles.tar.part* data/admins.sqlite data/valhalla.json data/places.tsv data/places.tsv.part* data/names.idx data/names.idx.part* data/map.pmtiles data/map.pmtiles.part* data/fonts.zip data/addresses.tsv data/addresses.tsv.part* data/postcodes.tsv data/lamps.tsv data/signals.tsv data/cameras.tsv data/limits.bin; do
+          for f in data/tiles.tar data/tiles.tar.part* data/admins.sqlite data/valhalla.json data/places.tsv data/places.tsv.part* data/names.idx data/names.idx.part* data/map.pmtiles data/map.pmtiles.part* data/fonts.zip data/addresses.tsv data/addresses.tsv.part* data/postcodes.tsv data/lamps.tsv data/signals.tsv data/cameras.tsv data/limits.bin data/chargers.tsv; do
             # GitHub won't take an empty file (an area with no traffic lights mapped, say): the app copes without it
             [ -s "$f" ] && FILES="$FILES $f"
           done
