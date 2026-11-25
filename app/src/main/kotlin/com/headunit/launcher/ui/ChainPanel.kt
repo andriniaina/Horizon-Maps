@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -103,6 +104,20 @@ internal fun SeeAllRow(engine: NavEngine, q: String, count: Int, onOpen: () -> U
     }
 }
 
+/**
+ * A charger's live availability: "8 of 12 free", or "No live info" when TomTom doesn't know this charger. Green with some free,
+ * red with none, grey when there is no live data.
+ */
+@Composable
+private fun FreeBadge(free: String) {
+    val c = LocalVw.current
+    val none = free.startsWith("0 of"); val unknown = free.startsWith("No")
+    val fg = if (unknown) c.sub else if (none) Color(0xFFF2C2BF) else Color(0xFF9BE3B0)
+    val bg = if (unknown) c.tile else if (none) Color(0xFF3A2224) else Color(0xFF1E3A28)
+    Text(free, color = fg, fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1,
+        modifier = Modifier.clip(RoundedCornerShape(8.dp)).background(bg).padding(horizontal = 8.dp, vertical = 3.dp))
+}
+
 private fun mins(secs: Double) = Math.max(1, Math.round(secs / 60.0).toInt())
 
 /** A branch's road and area from its address: "Portswood Road" and "Portswood, Southampton". */
@@ -146,10 +161,11 @@ internal fun ChainPanel(engine: NavEngine, modifier: Modifier) {
                 Icon(Icons.Rounded.Close, L.t("Close"), tint = c.text)
             }
         }
-        // the order: Quickest (drive time now), Nearest, On my route (while driving somewhere)
-        // (adding a stop: least detour, soonest along the way, nearest to you)
+        // the order while adding a stop: least detour, soonest along the way, nearest to you, and for chargers latest (15–25% of the
+        // battery left on arrival); elsewhere: Quickest (drive time now), Nearest, On my route (while driving somewhere)
         val sorts = if (view.forStop) listOfNotNull("route" to L.t("Least detour"), if (view.spots.any { it.price != null }) "cheap" to L.t("Cheapest") else null,
-            "soon" to L.t("Soonest"), "near" to L.t("Nearest")) else buildList {
+            "soon" to L.t("Soonest"), "near" to L.t("Nearest"),
+            if (engine.chainQuery == "EV charging station") "late" to L.t("Latest") else null) else buildList {
             if (view.spots.any { it.secs >= 0 }) add("quick" to L.t("Quickest"))
             add("near" to L.t("Nearest"))
             if (view.spots.any { it.detour >= 0 }) add("route" to L.t("On my route"))
@@ -164,9 +180,17 @@ internal fun ChainPanel(engine: NavEngine, modifier: Modifier) {
             }
         }
         val list = engine.chainSorted()
+        if (engine.chainGuard.isNotBlank()) Text(engine.chainGuard, color = c.sub, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
         // the cheapest price on the list, shown in green
         val low = view.spots.mapNotNull { it.price }.minOrNull()
-        LazyColumn(Modifier.padding(top = 10.dp).fillMaxWidth().weight(1f, fill = false)) {
+        // a new order (Least detour, Soonest, Nearest, Latest…) starts the list at the top: the row opened before keeps its place in
+        // the new order, and keeping the old scroll left the list halfway down with nothing on screen to say why
+        val listState = rememberLazyListState()
+        var shownSort by remember { mutableStateOf(engine.chainSort) }
+        LaunchedEffect(engine.chainSort) {
+            if (engine.chainSort != shownSort) { shownSort = engine.chainSort; listState.scrollToItem(0) }
+        }
+        LazyColumn(state = listState, modifier = Modifier.padding(top = 10.dp).fillMaxWidth().weight(1f, fill = false)) {
             items(list, key = { "${it.place.pos.lat},${it.place.pos.lon}" }) { s ->
                 val sel = engine.chainSel === s
                 val (road, area) = roadOf(s.place)
@@ -188,6 +212,8 @@ internal fun ChainPanel(engine: NavEngine, modifier: Modifier) {
                             Column(Modifier.padding(start = 12.dp).weight(1f)) {
                                 Text(s.place.name, color = c.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 Text(where, color = c.sub, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                // (asked when the charger is opened, not for every row: TomTom answers one charger per call)
+                                if (s.free.isNotBlank()) Row(Modifier.padding(top = 4.dp)) { FreeBadge(s.free) }
                             }
                             // a price: the price, with the detour small under it; no price: the detour as before
                             val pr = s.price

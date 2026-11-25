@@ -578,9 +578,15 @@ internal fun NearbyCard(engine: NavEngine) {
             Icon(Icons.Rounded.Close, L.t("Close"), tint = c.sub, modifier = Modifier.padding(start = 12.dp).size(22.dp).clickable { engine.clearNearby() })
         }
         if (hasPrices) Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-            Pill(if (along) L.t("Soonest") else L.t("Nearest"), engine.nearbySort != "cheap", { engine.changeNearbySort("near") })
-            Pill(L.t("Cheapest"), engine.nearbySort == "cheap", { engine.changeNearbySort("cheap") })
-            Text(com.headunit.launcher.FuelFinder.fuelName(engine.prefs.s(PreferenceKeys.FUEL_TYPE, "E10")), color = c.sub, fontSize = 12.sp, modifier = Modifier.padding(start = 6.dp))
+            // (chargers: the ones you reach soonest, or the ones that leave 15–25% of the battery on arrival, furthest ahead first)
+            val chargerOrder = engine.nearbyKind == "charging"
+            Pill(if (along) L.t("Soonest") else L.t("Nearest"), if (chargerOrder) engine.nearbySort != "late" else engine.nearbySort != "cheap", {
+                if (chargerOrder) engine.chooseChargerOrder(false) else engine.changeNearbySort("near")
+            })
+            val fuelType = com.headunit.launcher.FuelFinder.fuelName(engine.prefs.s(PreferenceKeys.FUEL_TYPE, "E10"))
+            if (chargerOrder) Pill(L.t("Latest"), engine.nearbySort == "late", { engine.chooseChargerOrder(true) })
+            else Pill(L.t("Cheapest"), engine.nearbySort == "cheap", { engine.changeNearbySort("cheap") })
+            if (!chargerOrder) Text(fuelType, color = c.sub, fontSize = 12.sp, modifier = Modifier.padding(start = 6.dp))
         }
         LazyColumn(Modifier.heightIn(max = 230.dp).padding(top = 6.dp)) {
             items(engine.nearby) { n ->
