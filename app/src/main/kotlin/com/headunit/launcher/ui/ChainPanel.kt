@@ -103,6 +103,20 @@ internal fun SeeAllRow(engine: NavEngine, q: String, count: Int, onOpen: () -> U
     }
 }
 
+/**
+ * A charger's live availability: "8 of 12 free", or "No live info" when TomTom doesn't know this charger. Green with some free,
+ * red with none, grey when there is no live data.
+ */
+@Composable
+private fun FreeBadge(free: String) {
+    val c = LocalVw.current
+    val none = free.startsWith("0 of"); val unknown = free.startsWith("No")
+    val fg = if (unknown) c.sub else if (none) Color(0xFFF2C2BF) else Color(0xFF9BE3B0)
+    val bg = if (unknown) c.tile else if (none) Color(0xFF3A2224) else Color(0xFF1E3A28)
+    Text(free, color = fg, fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1,
+        modifier = Modifier.clip(RoundedCornerShape(8.dp)).background(bg).padding(horizontal = 8.dp, vertical = 3.dp))
+}
+
 private fun mins(secs: Double) = Math.max(1, Math.round(secs / 60.0).toInt())
 
 /** A branch's road and area from its address: "Portswood Road" and "Portswood, Southampton". */
@@ -190,6 +204,8 @@ internal fun ChainPanel(engine: NavEngine, modifier: Modifier) {
                             Column(Modifier.padding(start = 12.dp).weight(1f)) {
                                 Text(s.place.name, color = c.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 Text(where, color = c.sub, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                // (asked when the charger is opened, not for every row: TomTom answers one charger per call)
+                                if (s.free.isNotBlank()) Row(Modifier.padding(top = 4.dp)) { FreeBadge(s.free) }
                             }
                             // a price: the price, with the detour small under it; no price: the detour as before
                             val pr = s.price

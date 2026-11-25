@@ -2210,13 +2210,17 @@ class NavEngine(private val ctx: Context, val prefs: Prefs, val map: MapBinding)
 
     // ---- "See all locations": every branch of a shop or chain near you, on the map and in a list ----
     /** One branch: [secs]/[road] from the matrix service (or -1 when it couldn't be timed), [detour] extra seconds on the route. */
-    class ChainSpot(val place: Place, val dist: Double, val secs: Double, val road: Double, val detour: Double,
+    data class ChainSpot(val place: Place, val dist: Double, val secs: Double, val road: Double, val detour: Double,
                     /** Adding a stop: how far along the route ahead it is, and how far off the route (metres; -1 not known). */
                     val ahead: Double = -1.0, val off: Double = -1.0,
                     /** Petrol stations: the price of your fuel there (pence or cents a litre, in [unit]), or null when not known. */
                     val price: Double? = null, val unit: String = "p",
                     /** Chargers: the connectors it has, as [Plugs] names (empty when nobody mapped them). */
-                    val plugs: List<String> = emptyList())
+                    val plugs: List<String> = emptyList(),
+                    /** A charger's TomTom id, for its live availability (empty when not known). */
+                    val chargeId: String = "",
+                    /** A charger's live availability: "8 of 12 free", "No live info", or empty while not asked (or not a charger). */
+                    val free: String = "")
     /** The list on show: [name] as searched, [domain] for its logo, [radius] metres looked within. */
     class ChainView(val name: String, val domain: String?, val spots: List<ChainSpot>, val radius: Int, val centre: LL,
                     /** Picking a stop to add along the route (the list is about the detour, and the only button is Add as a stop). */
@@ -2281,9 +2285,10 @@ class NavEngine(private val ctx: Context, val prefs: Prefs, val map: MapBinding)
             // logos (once each) off the main thread, then the map is drawn with them
             withContext(Dispatchers.IO) { found.mapNotNull { Logos.domainFor(it) }.distinct().take(6).forEach { Logos.load(ctx, it) } }
             val view = ChainView(found.first().name.let { n -> if (Logos.norm(n) == Logos.norm(q) || n.length > q.length + 14) q.replaceFirstChar { it.uppercase() } else n }, domain, spots, CHAIN_RADIUS, centre)
+            // (nothing is picked to begin with: a row opens on a tap, so its live availability is only asked for what is opened)
             chainSort = if (spots.any { it.secs >= 0 }) "quick" else "near"
             chain = view
-            chainSel = chainSorted().firstOrNull()
+            chainSel = null
             chainMoved = false
             chainBusy = false
             following = false
@@ -2368,8 +2373,9 @@ class NavEngine(private val ctx: Context, val prefs: Prefs, val map: MapBinding)
             val n = spots.first().place.name
             chain = ChainView(title ?: if (Logos.norm(n).startsWith(Logos.norm(q)) && n.length <= q.length + 14) n else q.replaceFirstChar { it.uppercase() },
                 domain, spots, 0, from, forStop = true)
+            // (nothing is picked to begin with: a row opens on a tap, and its live availability is only asked for what is opened)
             chainSort = "route"
-            chainSel = chainSorted().firstOrNull()
+            chainSel = null
             chainMoved = false
             chainBusy = false
             following = false
@@ -2463,9 +2469,43 @@ class NavEngine(private val ctx: Context, val prefs: Prefs, val map: MapBinding)
         }
     }
 
-    fun sortChainBy(s: String) { chainSort = s; chainSel = chainSorted().firstOrNull(); drawChain(fit = false) }
+    // (the order changes, not the row opened: the one picked stays open, or none does)
+    fun sortChainBy(s: String) { chainSort = s; drawChain(fit = false) }
 
-    fun selectChain(s: ChainSpot) { chainSel = s; drawChain(fit = false) }
+    fun selectChain(s: ChainSpot) { chainSel = s; drawChain(fit = false); askChainAvailability(s) }
+
+
+    /**
+     * The live availability of the charger opened in the list ("8 of 12 free"), asked there and then rather than for every row: TomTom
+     * answers one charger per call, so a whole list would cost a request each. It needs the charger's TomTom id, which the online
+     * search doesn't give with the results: the id is looked up once, round the charger, and remembered for the next tap.
+     */
+    private fun askChainAvailability(s: ChainSpot) {
+        if (chainQuery != "EV charging station" || !hasKey || !online()) return
+        if (s.free.isNotBlank()) return
+        scope.launch {
+            // (the id first: TomTom's availability endpoint asks for the charging station, not for a position)
+            var id = s.chargeId
+            val got = withContext(Dispatchers.IO) {
+                try {
+                    if (id.isBlank()) {
+                        val here = TomTomRest.poiNearby(apiKey, "charging", s.place.pos, 100).filter { it.chargeId.isNotBlank() }
+                        val hint = Logos.norm(s.place.name).take(12)
+                        // (the nearest one that carries the same name, so a charger across the street isn't reported)
+                        val hit = here.filter { Logos.norm(it.place.name).contains(hint) && hint.isNotBlank() }.minByOrNull { Geo.dist(it.place.pos, s.place.pos) }
+                            ?: here.filter { Geo.dist(it.place.pos, s.place.pos) < 40.0 }.minByOrNull { Geo.dist(it.place.pos, s.place.pos) }
+                        id = hit?.chargeId.orEmpty()
+                    }
+                    if (id.isBlank()) "No live info"
+                    else TomTomRest.chargingFree(apiKey, id)?.let { (f, t) -> "$f of $t free" } ?: "No live info"
+                } catch (e: Exception) { "No live info" }
+            }
+            val view = chain ?: return@launch
+            chain = ChainView(view.name, view.domain,
+                view.spots.map { if (it === s) it.copy(chargeId = id, free = got) else it }, view.radius, view.centre, view.forStop)
+            chainSel = chain?.spots?.firstOrNull { it.place.pos == s.place.pos && it.place.name == s.place.name } ?: chainSel
+        }
+    }
 
     /** A pin on the map tapped: that branch. */
     fun chainTapped(i: Int) { chain?.spots?.getOrNull(i)?.let { selectChain(it) } }
