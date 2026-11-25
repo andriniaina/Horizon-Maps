@@ -657,6 +657,17 @@ jobs:
             sleep $(( 15 * try ))
           done
           [ -n "$uploaded" ] || { echo "Couldn't upload$FILES to $REL"; exit 1; }
+          # The charger list gets a manifest, published after the file itself, so the app reads one generation even if an older
+          # chargers.tsv is still on the release. Only rewritten when the list actually changed, or every run would look new to it.
+          if [ -s data/chargers.tsv ]; then
+            (cd data && sha256sum chargers.tsv > chargers.candidate.sha256)
+            if cmp -s data/chargers.candidate.sha256 data/chargers.tsv.sha256; then
+              echo "chargers.tsv and its manifest unchanged"
+            else
+              mv data/chargers.candidate.sha256 data/chargers.tsv.sha256
+              gh release upload "$REL" data/chargers.tsv.sha256 --repo "${{ github.repository }}" --clobber
+            fi
+          fi
           echo "Download address: https://github.com/${{ github.repository }}/releases/download/$REL"
 
   build2:
@@ -1184,6 +1195,17 @@ jobs:
             sleep $(( 15 * try ))
           done
           [ -n "$uploaded" ] || { echo "Couldn't upload$FILES to $REL"; exit 1; }
+          # The charger list gets a manifest, published after the file itself, so the app reads one generation even if an older
+          # chargers.tsv is still on the release. Only rewritten when the list actually changed, or every run would look new to it.
+          if [ -s data/chargers.tsv ]; then
+            (cd data && sha256sum chargers.tsv > chargers.candidate.sha256)
+            if cmp -s data/chargers.candidate.sha256 data/chargers.tsv.sha256; then
+              echo "chargers.tsv and its manifest unchanged"
+            else
+              mv data/chargers.candidate.sha256 data/chargers.tsv.sha256
+              gh release upload "$REL" data/chargers.tsv.sha256 --repo "${{ github.repository }}" --clobber
+            fi
+          fi
           echo "Download address: https://github.com/${{ github.repository }}/releases/download/$REL"
 
   build3:
@@ -1711,6 +1733,17 @@ jobs:
             sleep $(( 15 * try ))
           done
           [ -n "$uploaded" ] || { echo "Couldn't upload$FILES to $REL"; exit 1; }
+          # The charger list gets a manifest, published after the file itself, so the app reads one generation even if an older
+          # chargers.tsv is still on the release. Only rewritten when the list actually changed, or every run would look new to it.
+          if [ -s data/chargers.tsv ]; then
+            (cd data && sha256sum chargers.tsv > chargers.candidate.sha256)
+            if cmp -s data/chargers.candidate.sha256 data/chargers.tsv.sha256; then
+              echo "chargers.tsv and its manifest unchanged"
+            else
+              mv data/chargers.candidate.sha256 data/chargers.tsv.sha256
+              gh release upload "$REL" data/chargers.tsv.sha256 --repo "${{ github.repository }}" --clobber
+            fi
+          fi
           echo "Download address: https://github.com/${{ github.repository }}/releases/download/$REL"
 
   build4:
@@ -2238,4 +2271,15 @@ jobs:
             sleep $(( 15 * try ))
           done
           [ -n "$uploaded" ] || { echo "Couldn't upload$FILES to $REL"; exit 1; }
+          # The charger list gets a manifest, published after the file itself, so the app reads one generation even if an older
+          # chargers.tsv is still on the release. Only rewritten when the list actually changed, or every run would look new to it.
+          if [ -s data/chargers.tsv ]; then
+            (cd data && sha256sum chargers.tsv > chargers.candidate.sha256)
+            if cmp -s data/chargers.candidate.sha256 data/chargers.tsv.sha256; then
+              echo "chargers.tsv and its manifest unchanged"
+            else
+              mv data/chargers.candidate.sha256 data/chargers.tsv.sha256
+              gh release upload "$REL" data/chargers.tsv.sha256 --repo "${{ github.repository }}" --clobber
+            fi
+          fi
           echo "Download address: https://github.com/${{ github.repository }}/releases/download/$REL"
