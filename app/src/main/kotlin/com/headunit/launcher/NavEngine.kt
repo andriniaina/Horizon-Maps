@@ -2469,8 +2469,9 @@ class NavEngine(private val ctx: Context, val prefs: Prefs, val map: MapBinding)
         }
     }
 
-    // (the order changes, not the row opened: the one picked stays open, or none does)
-    fun sortChainBy(s: String) { chainSort = s; drawChain(fit = false) }
+    // (a new order closes the row that was opened: it is somewhere else in the new order, and a row already open under a list that
+    // has moved is read as the wrong charger)
+    fun sortChainBy(s: String) { chainSort = s; chainSel = null; drawChain(fit = false) }
 
     fun selectChain(s: ChainSpot) { chainSel = s; drawChain(fit = false); askChainAvailability(s) }
 

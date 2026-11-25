@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -182,7 +183,14 @@ internal fun ChainPanel(engine: NavEngine, modifier: Modifier) {
         if (engine.chainGuard.isNotBlank()) Text(engine.chainGuard, color = c.sub, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
         // the cheapest price on the list, shown in green
         val low = view.spots.mapNotNull { it.price }.minOrNull()
-        LazyColumn(Modifier.padding(top = 10.dp).fillMaxWidth().weight(1f, fill = false)) {
+        // a new order (Least detour, Soonest, Nearest, Latest…) starts the list at the top: the row opened before keeps its place in
+        // the new order, and keeping the old scroll left the list halfway down with nothing on screen to say why
+        val listState = rememberLazyListState()
+        var shownSort by remember { mutableStateOf(engine.chainSort) }
+        LaunchedEffect(engine.chainSort) {
+            if (engine.chainSort != shownSort) { shownSort = engine.chainSort; listState.scrollToItem(0) }
+        }
+        LazyColumn(state = listState, modifier = Modifier.padding(top = 10.dp).fillMaxWidth().weight(1f, fill = false)) {
             items(list, key = { "${it.place.pos.lat},${it.place.pos.lon}" }) { s ->
                 val sel = engine.chainSel === s
                 val (road, area) = roadOf(s.place)
