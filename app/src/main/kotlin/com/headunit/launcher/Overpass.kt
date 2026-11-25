@@ -13,7 +13,9 @@ data class Nearby(val place: Place, val dist: Double, val extra: String, val pri
                   /** A charger's id for TomTom's live availability (empty when not known). */
                   val chargeId: String = "",
                   /** Live availability for a charger: "8 of 12 free", "No live info", or empty while not asked. */
-                  val free: String = "")
+                  val free: String = "",
+                  /** A charger's connectors, as [Plugs] names (empty when the data doesn't say). */
+                  val plugs: List<String> = emptyList())
 
 /** A fuel price the local way: "139.9p" in the UK, "€1.789" in the euro countries. [price] is in pence or cents a litre. */
 fun fmtFuelPrice(price: Double, unit: String): String = when (unit) {
@@ -511,10 +513,10 @@ object Overpass {
         "fuel_e85" -> "[\"amenity\"=\"fuel\"][\"fuel:e85\"=\"yes\"]"
         // stations mapped as selling LPG (autogas)
         "fuel_lpg" -> "[\"amenity\"=\"fuel\"][\"fuel:lpg\"=\"yes\"]"
-        "charging" -> "[\"amenity\"=\"charging_station\"]"
         "food" -> "[\"amenity\"~\"^(restaurant|fast_food)$\"]"
         "coffee" -> "[\"amenity\"=\"cafe\"]"
         "toilets" -> "[\"amenity\"=\"toilets\"]"
+        "charging" -> "[\"amenity\"=\"charging_station\"]"
         "services" -> "[\"highway\"~\"^(services|rest_area)$\"]"
         else -> "[\"amenity\"=\"parking\"]"
     }
@@ -524,7 +526,7 @@ object Overpass {
         "toilets" -> "Toilets"; "services" -> "Services"; "lorrypark" -> "Lorry park"; else -> "Car park"
     }
 
-    /** kind: "fuel", "charging", "parking", "food", "coffee", "toilets" or "services". */
+    /** kind: "fuel", "parking", "food", "coffee", "toilets" or "services". */
     fun nearby(kind: String, c: LL, radius: Int): List<Nearby> {
         val parts = filtersOf(kind).joinToString("") { f -> "node(around:$radius,${c.lat},${c.lon})$f;way(around:$radius,${c.lat},${c.lon})$f;" }
         val q = "[out:json][timeout:20];($parts);out center tags 80;"
@@ -574,21 +576,6 @@ object Overpass {
                     tags.optString("brand").takeIf { it.isNotBlank() && it != name }?.let { extra += it }
                     tags.optString("opening_hours").takeIf { it.isNotBlank() }?.let { extra += it }
                 }
-                "charging" -> {
-                    val sockets = ArrayList<String>()
-                    val it2 = tags.keys()
-                    while (it2.hasNext()) {
-                        val k = it2.next()
-                        if (k.startsWith("socket:") && k.count { ch -> ch == ':' } == 1) {
-                            val nice = k.removePrefix("socket:").replace("_", " ")
-                            val cnt = tags.optString(k)
-                            sockets += if (cnt.toIntOrNull() != null) "$nice ×$cnt" else nice
-                        }
-                    }
-                    if (sockets.isNotEmpty()) extra += sockets.take(3).joinToString(", ")
-                    tags.optString("capacity").takeIf { it.isNotBlank() }?.let { extra += "$it points" }
-                    tags.optString("operator").takeIf { it.isNotBlank() && it != name }?.let { extra += it }
-                }
                 "parking" -> {
                     // the price where it's mapped ("£1.80/hr"), else just paid or free; then opening hours and spaces
                     val charge = priceText(tags.optString("charge"))
@@ -608,6 +595,13 @@ object Overpass {
                     tags.optString("cuisine").takeIf { it.isNotBlank() }?.let { extra += it.replace("_", " ").replace(";", ", ") }
                     tags.optString("opening_hours").takeIf { it.isNotBlank() }?.let { extra += it }
                 }
+                "charging" -> {
+                    // (with no pack downloaded these are the chargers on offer: their connectors come from the socket tags)
+                    val kw = tags.optString("charging_station:output").trim().filter { it.isDigit() || it == '.' }.toDoubleOrNull()?.toInt() ?: 0
+                    if (kw > 0) extra += "$kw kW"
+                    tags.optString("capacity").takeIf { it.isNotBlank() }?.let { extra += "$it points" }
+                    Plugs.sockets(tagMap(tags)).takeIf { it.isNotEmpty() }?.let { extra += it.take(3).joinToString(", ") }
+                }
                 "toilets" -> {
                     when (tags.optString("fee")) { "yes" -> extra += "Paid"; "no" -> extra += "Free" }
                     if (tags.optString("wheelchair") == "yes") extra += "Accessible"
@@ -616,8 +610,14 @@ object Overpass {
                     tags.optString("operator").takeIf { it.isNotBlank() && it != name }?.let { extra += it }
                 }
             }
-            out += Nearby(Place(name, tags.optString("addr:street"), pos), Geo.dist(c, pos), extra.joinToString(" · "))
+            out += Nearby(Place(name, tags.optString("addr:street"), pos), Geo.dist(c, pos), extra.joinToString(" · "), plugs = if (kind == "charging") Plugs.sockets(tagMap(tags)) else emptyList())
         }
+        return out
+    }
+
+    private fun tagMap(tags: JSONObject): Map<String, String> {
+        val out = HashMap<String, String>(tags.length())
+        for (k in tags.keys()) out[k] = tags.optString(k)
         return out
     }
 }

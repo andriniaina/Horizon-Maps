@@ -348,10 +348,11 @@ jobs:
           def pt(g):
               c = g["coordinates"]
               if g["type"] == "Point": return c[1], c[0]
-              if g["type"] == "Polygon":
-                  r = c[0]; k = len(r) - 1 if len(r) > 1 else 1
-                  return sum(p[1] for p in r[:k]) / k, sum(p[0] for p in r[:k]) / k
-              return None
+              # (a charging station mapped as a building or a site: osmium gives a Polygon, or a MultiPolygon for a multipolygon relation)
+              rings = [c[0]] if g["type"] == "Polygon" else [poly[0] for poly in c] if g["type"] == "MultiPolygon" else None
+              if not rings: return None
+              r = max(rings, key=len); k = len(r) - 1 if len(r) > 1 else 1
+              return sum(p[1] for p in r[:k]) / k, sum(p[0] for p in r[:k]) / k
           def key(s): return "".join(ch.lower() if ch < "\x80" else ch for ch in s)
           with open("data/addr.geojsonseq", encoding="utf-8") as f, open("data/addr.unsorted", "w", encoding="utf-8") as out:
               for line in f:
@@ -860,10 +861,11 @@ jobs:
           def pt(g):
               c = g["coordinates"]
               if g["type"] == "Point": return c[1], c[0]
-              if g["type"] == "Polygon":
-                  r = c[0]; k = len(r) - 1 if len(r) > 1 else 1
-                  return sum(p[1] for p in r[:k]) / k, sum(p[0] for p in r[:k]) / k
-              return None
+              # (a charging station mapped as a building or a site: osmium gives a Polygon, or a MultiPolygon for a multipolygon relation)
+              rings = [c[0]] if g["type"] == "Polygon" else [poly[0] for poly in c] if g["type"] == "MultiPolygon" else None
+              if not rings: return None
+              r = max(rings, key=len); k = len(r) - 1 if len(r) > 1 else 1
+              return sum(p[1] for p in r[:k]) / k, sum(p[0] for p in r[:k]) / k
           def key(s): return "".join(ch.lower() if ch < "\x80" else ch for ch in s)
           with open("data/addr.geojsonseq", encoding="utf-8") as f, open("data/addr.unsorted", "w", encoding="utf-8") as out:
               for line in f:
@@ -1372,10 +1374,11 @@ jobs:
           def pt(g):
               c = g["coordinates"]
               if g["type"] == "Point": return c[1], c[0]
-              if g["type"] == "Polygon":
-                  r = c[0]; k = len(r) - 1 if len(r) > 1 else 1
-                  return sum(p[1] for p in r[:k]) / k, sum(p[0] for p in r[:k]) / k
-              return None
+              # (a charging station mapped as a building or a site: osmium gives a Polygon, or a MultiPolygon for a multipolygon relation)
+              rings = [c[0]] if g["type"] == "Polygon" else [poly[0] for poly in c] if g["type"] == "MultiPolygon" else None
+              if not rings: return None
+              r = max(rings, key=len); k = len(r) - 1 if len(r) > 1 else 1
+              return sum(p[1] for p in r[:k]) / k, sum(p[0] for p in r[:k]) / k
           def key(s): return "".join(ch.lower() if ch < "\x80" else ch for ch in s)
           with open("data/addr.geojsonseq", encoding="utf-8") as f, open("data/addr.unsorted", "w", encoding="utf-8") as out:
               for line in f:
@@ -1884,10 +1887,11 @@ jobs:
           def pt(g):
               c = g["coordinates"]
               if g["type"] == "Point": return c[1], c[0]
-              if g["type"] == "Polygon":
-                  r = c[0]; k = len(r) - 1 if len(r) > 1 else 1
-                  return sum(p[1] for p in r[:k]) / k, sum(p[0] for p in r[:k]) / k
-              return None
+              # (a charging station mapped as a building or a site: osmium gives a Polygon, or a MultiPolygon for a multipolygon relation)
+              rings = [c[0]] if g["type"] == "Polygon" else [poly[0] for poly in c] if g["type"] == "MultiPolygon" else None
+              if not rings: return None
+              r = max(rings, key=len); k = len(r) - 1 if len(r) > 1 else 1
+              return sum(p[1] for p in r[:k]) / k, sum(p[0] for p in r[:k]) / k
           def key(s): return "".join(ch.lower() if ch < "\x80" else ch for ch in s)
           with open("data/addr.geojsonseq", encoding="utf-8") as f, open("data/addr.unsorted", "w", encoding="utf-8") as out:
               for line in f:

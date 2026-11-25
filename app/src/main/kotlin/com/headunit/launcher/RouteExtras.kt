@@ -97,7 +97,11 @@ object RouteExtras {
     }
 
     /** Distance along the route of the closest point to [p], and how far [p] is from the route. Null when it is further than [maxOff]. */
-    fun project(r: Route, p: LL, maxOff: Double, fromOff: Double = 0.0): Pair<Double, Double>? {
+    /**
+     * Distance along the route of the closest point to [p], and how far [p] is from the route. Null when it is further than [maxOff].
+     * Only the stretch from [fromOff] to [toOff] counts, so a road that comes back later in the trip can't hide a place ahead now.
+     */
+    fun project(r: Route, p: LL, maxOff: Double, fromOff: Double = 0.0, toOff: Double = Double.MAX_VALUE): Pair<Double, Double>? {
         val pts = r.pts
         if (pts.size < 2) return null
         val kx = cos(Math.toRadians(p.lat)) * 111320.0
@@ -106,6 +110,7 @@ object RouteExtras {
         var i = 0
         while (i < pts.size - 1) {
             if (r.cum[i + 1] < fromOff) { i++; continue }
+            if (r.cum[i] > toOff) break
             val ax = (pts[i].lon - p.lon) * kx; val ay = (pts[i].lat - p.lat) * ky
             val bx = (pts[i + 1].lon - p.lon) * kx; val by = (pts[i + 1].lat - p.lat) * ky
             // the whole segment lies well off to one side: it cannot be the closest
@@ -114,7 +119,9 @@ object RouteExtras {
             val l2 = dx * dx + dy * dy
             val t = if (l2 > 0) (-(ax * dx + ay * dy) / l2).coerceIn(0.0, 1.0) else 0.0
             val d = hypot(ax + dx * t, ay + dy * t)
-            if (d < bd) { bd = d; bo = r.cum[i] + (r.cum[i + 1] - r.cum[i]) * t }
+            val off = r.cum[i] + (r.cum[i + 1] - r.cum[i]) * t
+            if (off < fromOff || off > toOff) { i++; continue }
+            if (d < bd) { bd = d; bo = off }
             i++
         }
         return if (bo >= 0) bo to bd else null

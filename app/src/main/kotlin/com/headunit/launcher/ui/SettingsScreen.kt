@@ -29,6 +29,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material.icons.Icons
 import androidx.compose.foundation.layout.height
 import androidx.compose.material.icons.rounded.DriveEta
+import androidx.compose.material.icons.rounded.EvStation
 import androidx.compose.material.icons.rounded.StarBorder
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Shop
@@ -81,9 +82,11 @@ import com.headunit.launcher.FuelFinder
 import com.headunit.launcher.Geo
 import com.headunit.launcher.L
 import com.headunit.launcher.NavEngine
+import com.headunit.launcher.OfflineChargers
 import com.headunit.launcher.OfflinePlaces
 import com.headunit.launcher.OwnModel
 import com.headunit.launcher.Place
+import com.headunit.launcher.Plugs
 import com.headunit.launcher.Prefs
 import com.headunit.launcher.PreferenceKeys
 import com.headunit.launcher.carSpeedSpot
@@ -154,6 +157,11 @@ private fun SettingsBody(prefs: Prefs, engine: NavEngine, onClose: () -> Unit) {
     }
     var query by remember { mutableStateOf("") }
     var highlight by remember { mutableStateOf<String?>(null) }
+    // (set from Fuel & charging's link: goes to Offline maps, with its Chargers row lit up)
+    var fuelOpenChargers by remember { mutableStateOf(false) }
+    if (fuelOpenChargers) androidx.compose.runtime.LaunchedEffect(Unit) {
+        cat = 12; highlight = "Charging points"; showList = false; fuelOpenChargers = false
+    }
     val focus = androidx.compose.ui.platform.LocalFocusManager.current
     val words = query.trim().lowercase().split(Regex("\\s+")).filter { it.isNotBlank() }
     val matches = remember(query) {
@@ -284,7 +292,8 @@ private fun SettingsBody(prefs: Prefs, engine: NavEngine, onClose: () -> Unit) {
                         8 -> SoundSection(prefs, engine)
                         9 -> WhileDrivingSection(prefs)
                         10 -> { PlacesSection(engine); MyRoutesGroup(engine, onShown = onClose); GpxGroup(engine, onShown = onClose); PhoneLinkGroup(prefs); SharingGroups(prefs) }
-                        11 -> FuelSection(prefs, engine)
+                        // (a lambda, and the outer state: in here cat is the section being shown, which can't be changed)
+        11 -> FuelSection(prefs, engine) { fuelOpenChargers = true }
                         12 -> { OfflineMapsContent(prefs, engine); OfflinePlacesGroup(engine) }
                         13 -> ScreenSection(prefs, engine)
                         14 -> AndroidAutoSection(prefs)
@@ -1180,7 +1189,7 @@ private fun SharingGroups(prefs: Prefs) {
 // ------------------------------------------------------------------ Fuel & charging
 
 @Composable
-private fun FuelSection(prefs: Prefs, engine: NavEngine) {
+private fun FuelSection(prefs: Prefs, engine: NavEngine, openOfflineChargers: () -> Unit = {}) {
     // (kept in the same units inside whichever are shown, miles per kWh and UK miles per gallon, so saved figures don't change)
     val mi = engine.imperial
     fun num(t: String) = t.filter { it.isDigit() || it == '.' }
@@ -1215,11 +1224,42 @@ private fun FuelSection(prefs: Prefs, engine: NavEngine) {
     if (prefs.s(PreferenceKeys.FUEL_TYPE, "E10") == "EV") SGroup(L.t("Your electric car"), footer = L.t("With the efficiency and price filled in, each route shows roughly what it will cost to charge for. The efficiency and battery size also give the battery estimate on the trip card and the charging stop suggestions (set your battery level on the route options).")) {
         SToggle(prefs, L.t("Battery estimate on the trip card"), PreferenceKeys.EV_PCT_CARD, true, L.t("Roughly how much battery you'll arrive with, on the phone and Android Auto. It's worked out from your settings, not read from the car"))
         SToggle(prefs, L.t("Show petrol stations too"), PreferenceKeys.EV_SHOW_FUEL, false, L.t("The Fuel button on the map page (on the phone and Android Auto). Off: Charging takes its place"))
-        if (mi) SFieldItem(L.t("Efficiency (miles per kWh)"), prefs.s(PreferenceKeys.EVMPK, ""), placeholder = L.t("e.g. 3.5"), number = true) { s -> prefs.put(PreferenceKeys.EVMPK, num(s).take(5)) }
+        // only chargers with the plugs the car has; none picked means every charger, which is how it worked before (and what a
+        // driver sees who hasn't been to this screen)
+        var myPlugs by remember { mutableStateOf(Plugs.picked(prefs)) }
+        SMultiChoice(L.t("My charger connectors"), Plugs.ALL.map { it to L.t(it) }, myPlugs,
+            if (myPlugs.isEmpty()) L.t("Any connector. Pick the ones your car has to see only chargers that fit")
+            else L.t("{0} picked. Chargers with no connectors listed are still shown, after the ones that fit", myPlugs.size),
+            icon = Icons.Rounded.EvStation, iconTint = Color(0xFF34A853)) { picked ->
+            if (picked != myPlugs) {
+                Plugs.set(prefs, picked)
+                myPlugs = picked
+                engine.refreshEvPlan()
+                // (the open charging list is filtered with the old connectors until it is searched again)
+                if (engine.nearbyKind == "charging") engine.loadNearby("charging", false)
+            }
+        }
+        // (the connectors picked above only show their worth once the chargers are on the phone: the pack is where their connector
+        // types come from, so the way to it sits right under the picker)
+        val ctx = androidx.compose.ui.platform.LocalContext.current
+        val pack = engine.chosenPack()
+        val chargersInstalled = androidx.compose.runtime.remember(engine.packRev, pack.id) { OfflineChargers.installed(ctx, pack) }
+        SItem(
+            if (chargersInstalled) L.t("Offline chargers are downloaded") else L.t("Download the charging points ({0})", pack.name),
+            if (chargersInstalled) L.t("The charging list and the connector filter work with no signal. Update them in Offline maps › Chargers")
+            else L.t("Connector types come with them, so chargers that fit your car are picked out. In Offline maps › Chargers"),
+            onClick = openOfflineChargers, icon = Icons.Rounded.CloudDownload, iconTint = Color(0xFF8E5CF0),
+            trailing = { Icon(Icons.Rounded.ChevronRight, null, tint = LocalVw.current.sub, modifier = Modifier.size(22.dp)) },
+        )
+        // (the suggested charging stop normally takes the shortest detour; this makes it charge as late as the battery safely allows)
+        SToggle(prefs, L.t("Charge as late as possible"), PreferenceKeys.EV_LATE_CHARGE, false,
+            L.t("The suggested charging stop is the furthest one along the route that still leaves 15–25% of the battery when you get there, instead of the one with the shortest detour. Needs the efficiency and battery size below")) { engine.refreshEvPlan() }
+        if (mi) SFieldItem(L.t("Efficiency (miles per kWh)"), prefs.s(PreferenceKeys.EVMPK, ""), placeholder = L.t("e.g. 3.5"), number = true) { s -> prefs.put(PreferenceKeys.EVMPK, num(s).take(5)); engine.refreshEvPlan() }
         else SFieldItem(L.t("Efficiency (km per kWh)"), prefs.s(PreferenceKeys.EVMPK, "").toDoubleOrNull()?.let { fmt1(it * 1.609344) } ?: "", placeholder = L.t("e.g. 5.6"), number = true) { s ->
             prefs.put(PreferenceKeys.EVMPK, num(s).toDoubleOrNull()?.takeIf { it > 0 }?.let { String.format(java.util.Locale.US, "%.3f", it / 1.609344) } ?: "")
+            engine.refreshEvPlan()
         }
-        SFieldItem(L.t("Usable battery (kWh)"), prefs.s(PreferenceKeys.EV_BATTERY_KWH, ""), L.t("For the battery estimate and charging stops (60 if left blank)"), placeholder = L.t("e.g. 64"), number = true) { s -> prefs.put(PreferenceKeys.EV_BATTERY_KWH, s.filter { it.isDigit() || it == '.' }.take(5)) }
+        SFieldItem(L.t("Usable battery (kWh)"), prefs.s(PreferenceKeys.EV_BATTERY_KWH, ""), L.t("For the battery estimate and charging stops (60 if left blank)"), placeholder = L.t("e.g. 64"), number = true) { s -> prefs.put(PreferenceKeys.EV_BATTERY_KWH, s.filter { it.isDigit() || it == '.' }.take(5)); engine.refreshEvPlan() }
         // (in currencies where a kWh or a litre costs more than a few of the main unit, rupees or kroner say, the price is asked for
         // as it's normally written, in that currency: bijindas)
         val cur = moneyCurrency(prefs)
@@ -1250,7 +1290,8 @@ private fun OfflinePlacesGroup(engine: NavEngine) {
     val ctx = LocalContext.current
     val sc = rememberCoroutineScope()
     // the country of the chosen pack, else the one you're in
-    val cc = engine.chosenPack().country.ifBlank { engine.detectedCountry }.ifBlank { "GB" }
+    val pack = engine.chosenPack()
+    val cc = pack.country.ifBlank { engine.detectedCountry }.ifBlank { "GB" }
     val where = countryName(cc)
     var state by remember { mutableStateOf(if (OfflinePlaces.installed(ctx)) L.t("Installed (%.1f MB)").format(OfflinePlaces.sizeMb(ctx)) else L.t("Not downloaded")) }
     var busy by remember { mutableStateOf(false) }
@@ -1268,6 +1309,27 @@ private fun OfflinePlacesGroup(engine: NavEngine) {
                 }
             }
             if (OfflinePlaces.installed(ctx) && !busy) SButton(L.t("Remove"), danger = true) { OfflinePlaces.delete(ctx); state = L.t("Not downloaded") }
+        }
+    }
+    // the chargers of the same country, so the charging list and the connectors picked above work with no signal at all
+    var chState by remember(pack.id) { mutableStateOf(if (OfflineChargers.installed(ctx, pack)) L.t("Installed: {0} chargers", OfflineChargers.count(ctx, pack)) else L.t("Not downloaded")) }
+    var chBusy by remember { mutableStateOf(false) }
+    SGroup(L.t("Chargers"), footer = L.t("Charging points for {0}, kept on the device so the charging list and your connector preferences work with no signal.", pack.name)) {
+        SItem(L.t("Charging points"), chState) {
+            SButton(if (chBusy) L.t("Downloading…") else if (OfflineChargers.installed(ctx, pack)) L.t("Update") else L.t("Download"), primary = !OfflineChargers.installed(ctx, pack)) {
+                if (!chBusy) {
+                    chBusy = true; chState = L.t("Downloading (needs signal)…")
+                    sc.launch {
+                        try {
+                            val n = withContext(Dispatchers.IO) { OfflineChargers.download(ctx, pack) }
+                            chState = L.t("Installed: {0} chargers", n); engine.toast(L.t("Offline chargers ready"), 3000)
+                        } catch (e: Exception) { chState = L.t("Failed: {0}", e.message) } finally { chBusy = false }
+                    }
+                }
+            }
+            if (OfflineChargers.installed(ctx, pack) && !chBusy) SButton(L.t("Remove"), danger = true) {
+                OfflineChargers.delete(ctx, pack); chState = L.t("Not downloaded")
+            }
         }
     }
 }

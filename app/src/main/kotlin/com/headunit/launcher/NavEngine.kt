@@ -21,6 +21,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -234,7 +235,7 @@ class NavEngine(private val ctx: Context, val prefs: Prefs, val map: MapBinding)
     var externalTick by mutableIntStateOf(0)
     /** The stops editor is open. */
     var stopsEditor by mutableStateOf(false)
-    /** How the fuel list is sorted: "near" or "cheap". */
+    /** How the fuel list is sorted: "near" or "cheap"; for chargers "near" (soonest) or "late" (15–25% on arrival). */
     var nearbySort by mutableStateOf("near")
     /** Name of the road you are on (route or map data), for the free-driving card. */
     var roadNow by mutableStateOf("")
@@ -2015,6 +2016,10 @@ class NavEngine(private val ctx: Context, val prefs: Prefs, val map: MapBinding)
         return PackRegions.suggestFor(detectedCountry) ?: PackRegions.byId("ew")
     }
 
+    /** The areas whose chargers are searched: the one in use, then the one picked to add (often the same). */
+    private fun chargerPacks(): List<PackRegion> =
+        listOfNotNull(installedPackId()?.let { PackRegions.byId(it) }, chosenPack()).distinctBy { it.id }
+
     /** Switches to a downloaded area by hand (it switches back by itself if you're somewhere another area covers better). */
     fun useArea(id: String) {
         OfflineRouter.setActive(ctx, id); areaPending = null; areaCheckAt = System.currentTimeMillis()
@@ -2205,11 +2210,17 @@ class NavEngine(private val ctx: Context, val prefs: Prefs, val map: MapBinding)
 
     // ---- "See all locations": every branch of a shop or chain near you, on the map and in a list ----
     /** One branch: [secs]/[road] from the matrix service (or -1 when it couldn't be timed), [detour] extra seconds on the route. */
-    class ChainSpot(val place: Place, val dist: Double, val secs: Double, val road: Double, val detour: Double,
+    data class ChainSpot(val place: Place, val dist: Double, val secs: Double, val road: Double, val detour: Double,
                     /** Adding a stop: how far along the route ahead it is, and how far off the route (metres; -1 not known). */
                     val ahead: Double = -1.0, val off: Double = -1.0,
                     /** Petrol stations: the price of your fuel there (pence or cents a litre, in [unit]), or null when not known. */
-                    val price: Double? = null, val unit: String = "p")
+                    val price: Double? = null, val unit: String = "p",
+                    /** Chargers: the connectors it has, as [Plugs] names (empty when nobody mapped them). */
+                    val plugs: List<String> = emptyList(),
+                    /** A charger's TomTom id, for its live availability (empty when not known). */
+                    val chargeId: String = "",
+                    /** A charger's live availability: "8 of 12 free", "No live info", or empty while not asked (or not a charger). */
+                    val free: String = "")
     /** The list on show: [name] as searched, [domain] for its logo, [radius] metres looked within. */
     class ChainView(val name: String, val domain: String?, val spots: List<ChainSpot>, val radius: Int, val centre: LL,
                     /** Picking a stop to add along the route (the list is about the detour, and the only button is Add as a stop). */
@@ -2218,6 +2229,8 @@ class NavEngine(private val ctx: Context, val prefs: Prefs, val map: MapBinding)
     var chainSel by mutableStateOf<ChainSpot?>(null)
     /** "quick", "near" or "route" (On my route, only while driving somewhere). */
     var chainSort by mutableStateOf("quick")
+    /** A line under the list saying where its data comes from, when it can't be complete on this phone (chargers, no pack). */
+    var chainGuard by mutableStateOf("")
     var chainBusy by mutableStateOf(false)
     /** The map was moved away from where the branches were looked for: "Search this area" shows. */
     var chainMoved by mutableStateOf(false)
@@ -2272,9 +2285,10 @@ class NavEngine(private val ctx: Context, val prefs: Prefs, val map: MapBinding)
             // logos (once each) off the main thread, then the map is drawn with them
             withContext(Dispatchers.IO) { found.mapNotNull { Logos.domainFor(it) }.distinct().take(6).forEach { Logos.load(ctx, it) } }
             val view = ChainView(found.first().name.let { n -> if (Logos.norm(n) == Logos.norm(q) || n.length > q.length + 14) q.replaceFirstChar { it.uppercase() } else n }, domain, spots, CHAIN_RADIUS, centre)
+            // (nothing is picked to begin with: a row opens on a tap, so its live availability is only asked for what is opened)
             chainSort = if (spots.any { it.secs >= 0 }) "quick" else "near"
             chain = view
-            chainSel = chainSorted().firstOrNull()
+            chainSel = null
             chainMoved = false
             chainBusy = false
             following = false
@@ -2302,7 +2316,7 @@ class NavEngine(private val ctx: Context, val prefs: Prefs, val map: MapBinding)
             var i = i0
             while (i < r.pts.size) { ahead += r.pts[i]; i += step }
             if (ahead.lastOrNull() != r.pts.last()) ahead += r.pts.last()
-            val found: List<Pair<Place, Int>> = withContext(Dispatchers.IO) {
+            val foundAll: List<Pair<Place, Int>> = withContext(Dispatchers.IO) {
                 val all = ArrayList<Pair<Place, Int>>()
                 if (hasKey && online()) try { all += TomTomRest.alongText(apiKey, q, ahead) } catch (e: Exception) { }
                 if (all.isEmpty()) {
@@ -2323,6 +2337,16 @@ class NavEngine(private val ctx: Context, val prefs: Prefs, val map: MapBinding)
             }
             val from = fix?.pos ?: ahead.first()
             val fuelList = category && q == "petrol station"
+            val chargerList = category && q == "EV charging station"
+            // (no chargers pack on the phone: the pack's chargers don't exist here, and the online searches don't say which
+            // connectors a charger has, so the list says where its connectors come from)
+            val noPack = chargerList && chargerPacks().none { OfflineChargers.installed(ctx, it) }
+            val pack = chosenPack()
+            // (the downloaded chargers along the rest of the route, in the order found, joined to what the online search found:
+            // with a pack the list is the pack's, which is the only source that says which connectors each charger has)
+            val chargerFound = if (chargerList) (try { OfflineChargers.nearRoute(ctx, r, prog, r.len - prog, 0.0, pack) { detour(it) } } catch (e: IOException) { emptyList() })
+                .filter { Plugs.matchQuality(it.plugs, Plugs.picked(prefs)) > 0 } else emptyList()
+            val found = foundAll + chargerFound.map { it.place to -1 }.filter { (p, _) -> foundAll.none { Geo.dist(it.first.pos, p.pos) < 80.0 } }
             val spots0 = found.mapNotNull { (p, t) ->
                 // where it is against the route: the nearest point of the route still ahead
                 var best = Double.MAX_VALUE; var at = -1
@@ -2331,22 +2355,27 @@ class NavEngine(private val ctx: Context, val prefs: Prefs, val map: MapBinding)
                 while (j < r.pts.size) { val d = Geo.dist(r.pts[j], p.pos); if (d < best) { best = d; at = j }; j += st }
                 if (at < 0 || best > 6000.0) return@mapNotNull null
                 val detour = if (t >= 0) t.toDouble() else best * 2.6 / 13.0
-                ChainSpot(p, Geo.dist(from, p.pos), -1.0, -1.0, detour, ahead = (r.cum[at] - prog).coerceAtLeast(0.0), off = best)
+                // (chargers: the connectors come from the pack, matched by place: the online search doesn't carry them)
+                val plugCharger = if (chargerList) chargerFound.firstOrNull { Geo.dist(it.place.pos, p.pos) < 80.0 } else null
+                ChainSpot(p, Geo.dist(from, p.pos), -1.0, -1.0, detour, ahead = (r.cum[at] - prog).coerceAtLeast(0.0), off = best, plugs = plugCharger?.plugs ?: emptyList())
             }
             // petrol stations: each one's price for your fuel, from the price service the app already uses (and any priced station
             // the search missed); everything else as it was
             val spots = if (fuelList) {
                 val priced = try { withContext(Dispatchers.Default) { priceFuelSpots(r, prog, from, spots0) } } catch (e: Exception) { spots0 }
                 priced.sortedBy { it.detour }.take(40)
-            } else spots0.sortedBy { it.detour }.take(25)
+            } else if (chargerList && noPack) spots0.sortedBy { it.detour }.take(60)
+            else spots0.sortedBy { it.detour }.take(25)
             if (spots.isEmpty()) { chainBusy = false; toast(L.t("Nothing found along the route ahead"), 3000); return@launch }
             withContext(Dispatchers.IO) { spots.mapNotNull { Logos.domainFor(it.place) }.distinct().take(6).forEach { Logos.load(ctx, it) } }
             val domain = spots.asSequence().mapNotNull { Logos.domainFor(it.place) }.firstOrNull()
+            chainGuard = if (chargerList && noPack) L.t("Connector types for each charger need a chargers pack. Download it in Settings › Offline maps to filter by plug type") else ""
             val n = spots.first().place.name
             chain = ChainView(title ?: if (Logos.norm(n).startsWith(Logos.norm(q)) && n.length <= q.length + 14) n else q.replaceFirstChar { it.uppercase() },
                 domain, spots, 0, from, forStop = true)
+            // (nothing is picked to begin with: a row opens on a tap, and its live availability is only asked for what is opened)
             chainSort = "route"
-            chainSel = chainSorted().firstOrNull()
+            chainSel = null
             chainMoved = false
             chainBusy = false
             following = false
@@ -2423,12 +2452,16 @@ class NavEngine(private val ctx: Context, val prefs: Prefs, val map: MapBinding)
         return best * 2.6 / 13.0
     }
 
-    /** The branches in the order picked: Quickest, Nearest or On my route. */
+    /** The branches in the order picked: Least detour, Soonest, Latest, Nearest or Cheapest. */
     fun chainSorted(): List<ChainSpot> {
         val c = chain ?: return emptyList()
         return when (chainSort) {
             "route" -> c.spots.sortedBy { if (it.detour >= 0) it.detour else Double.MAX_VALUE }
             "soon" -> c.spots.sortedBy { if (it.ahead >= 0) it.ahead else Double.MAX_VALUE }
+            // (chargers: the ones that leave 15–25% on arrival first, the furthest ahead of those leading)
+            "late" -> c.spots.sortedWith(
+                compareBy<ChainSpot> { val pct = Plugs.pctOnArrival(it.ahead, prefs.i(PreferenceKeys.EV_CHARGE_PCT, 80).coerceIn(1, 100).toDouble(), evKwhPerKm(), evBatteryKwh()); if (pct < Plugs.ARRIVE_LOW_PCT) 1 else if (pct > Plugs.ARRIVE_HIGH_PCT) 2 else 0 }
+                    .thenByDescending { it.ahead })
             // (no price last; the same price: the smaller detour first)
             "cheap" -> c.spots.sortedWith(compareBy<ChainSpot>({ it.price ?: Double.MAX_VALUE }, { if (it.detour >= 0) it.detour else Double.MAX_VALUE }))
             "quick" -> c.spots.sortedBy { if (it.secs >= 0) it.secs else it.dist / 9.0 }
@@ -2436,9 +2469,44 @@ class NavEngine(private val ctx: Context, val prefs: Prefs, val map: MapBinding)
         }
     }
 
-    fun sortChainBy(s: String) { chainSort = s; chainSel = chainSorted().firstOrNull(); drawChain(fit = false) }
+    // (a new order closes the row that was opened: it is somewhere else in the new order, and a row already open under a list that
+    // has moved is read as the wrong charger)
+    fun sortChainBy(s: String) { chainSort = s; chainSel = null; drawChain(fit = false) }
 
-    fun selectChain(s: ChainSpot) { chainSel = s; drawChain(fit = false) }
+    fun selectChain(s: ChainSpot) { chainSel = s; drawChain(fit = false); askChainAvailability(s) }
+
+
+    /**
+     * The live availability of the charger opened in the list ("8 of 12 free"), asked there and then rather than for every row: TomTom
+     * answers one charger per call, so a whole list would cost a request each. It needs the charger's TomTom id, which the online
+     * search doesn't give with the results: the id is looked up once, round the charger, and remembered for the next tap.
+     */
+    private fun askChainAvailability(s: ChainSpot) {
+        if (chainQuery != "EV charging station" || !hasKey || !online()) return
+        if (s.free.isNotBlank()) return
+        scope.launch {
+            // (the id first: TomTom's availability endpoint asks for the charging station, not for a position)
+            var id = s.chargeId
+            val got = withContext(Dispatchers.IO) {
+                try {
+                    if (id.isBlank()) {
+                        val here = TomTomRest.poiNearby(apiKey, "charging", s.place.pos, 100).filter { it.chargeId.isNotBlank() }
+                        val hint = Logos.norm(s.place.name).take(12)
+                        // (the nearest one that carries the same name, so a charger across the street isn't reported)
+                        val hit = here.filter { Logos.norm(it.place.name).contains(hint) && hint.isNotBlank() }.minByOrNull { Geo.dist(it.place.pos, s.place.pos) }
+                            ?: here.filter { Geo.dist(it.place.pos, s.place.pos) < 40.0 }.minByOrNull { Geo.dist(it.place.pos, s.place.pos) }
+                        id = hit?.chargeId.orEmpty()
+                    }
+                    if (id.isBlank()) "No live info"
+                    else TomTomRest.chargingFree(apiKey, id)?.let { (f, t) -> "$f of $t free" } ?: "No live info"
+                } catch (e: Exception) { "No live info" }
+            }
+            val view = chain ?: return@launch
+            chain = ChainView(view.name, view.domain,
+                view.spots.map { if (it === s) it.copy(chargeId = id, free = got) else it }, view.radius, view.centre, view.forStop)
+            chainSel = chain?.spots?.firstOrNull { it.place.pos == s.place.pos && it.place.name == s.place.name } ?: chainSel
+        }
+    }
 
     /** A pin on the map tapped: that branch. */
     fun chainTapped(i: Int) { chain?.spots?.getOrNull(i)?.let { selectChain(it) } }
@@ -3762,47 +3830,98 @@ class NavEngine(private val ctx: Context, val prefs: Prefs, val map: MapBinding)
                             }
                         } else Overpass.nearby(osmKind, centre, 15_000).map { it.copy(dist = Geo.dist(origin, it.place.pos)) }
                     }
-                    // TomTom's place search first (quick, and it knows the detour time along a route); OpenStreetMap if that fails
+                    val charging = kind == "charging"
+                    val picked = if (charging) Plugs.picked(prefs) else emptySet()
+                    val wantPlugs = picked.isNotEmpty()
+                    // (charging late: the furthest charger that still leaves 15–25% can be well past the half-charge the fixed
+                    // lookahead stops at, so the lookahead reaches where the battery would be down to 0%, within a sane limit;
+                    // "Latest" picked in the list asks for the same reach)
+                    val late = charging && (lateCharge() || nearbySort == "late")
+                    val reach = if (late) lateReach() else 60_000.0
+                    fun savedChargers(): List<Nearby> {
+                        // (the area in use and the one picked to add next can differ, and either may hold these chargers)
+                        val found = ArrayList<Nearby>()
+                        for (pack in chargerPacks()) found += try {
+                            if (alongRoute && rt != null) OfflineChargers.nearRoute(ctx, rt, progress, reach, 2_000.0, pack, ::detour)
+                            else OfflineChargers.near(ctx, centre, radius, pack).map { it.copy(dist = Geo.dist(origin, it.place.pos)) }
+                        } catch (e: IOException) { emptyList() }
+                        return OfflineChargers.shortlist(found, picked)
+                    }
+                    if (charging && !online()) return@async savedChargers()
+                    var providerResults = emptyList<Nearby>()
+                    // Try the configured provider first. Chargers fall back to the downloaded pack, not Overpass.
                     if (hasOnline && online()) {
                         val tt = try {
                             if (alongRoute && rt != null && provider == "tomtom") {
-                                val line = RouteExtras.line(rt, progress, progress + 80_000.0, 600.0, 140)
+                                val line = RouteExtras.line(rt, progress, progress + max(80_000.0, reach), 600.0, 140)
                                 TomTomRest.poiAlong(apiKey, kind, line).mapNotNull { (n, secs) ->
                                     val pr = RouteExtras.project(rt, n.place.pos, 3000.0, progress) ?: return@mapNotNull null
                                     if (pr.first < progress - 100) null
                                     else n.copy(dist = pr.first - progress, detourMin = if (secs >= 0) Math.round(secs / 60.0).toInt() else detour(pr.second), ahead = true)
                                 }
                             } else if (alongRoute && rt != null) null   // (along the route: Mapbox can't search along a line, so OpenStreetMap does it below)
+                            // Mapbox does not provide connector data; use the downloaded pack instead.
+                            else if (wantPlugs && (provider == "mapbox" || apiKey.isBlank())) null
                             else netPoiNearby(kind, centre, radius).map { it.copy(dist = Geo.dist(origin, it.place.pos)) }
                         } catch (e: Exception) { null }
-                        if (!tt.isNullOrEmpty()) return@async tt
+                        providerResults = tt.orEmpty()
+                        if (Plugs.resultQuality(providerResults, picked) == 2) return@async providerResults
                     }
                     if (alongRoute && rt != null) {
-                        val line = RouteExtras.line(rt, progress, progress + 60_000.0, 1500.0, 45)
+                        val line = RouteExtras.line(rt, progress, progress + reach, 1500.0, 45)
                         // Mapbox first (a few points along the next 40 km, asked all at once: a second or two); the free OpenStreetMap
                         // servers only when it finds nothing or there's no Mapbox key (they're often busy and can take a long time)
-                        val fromMapbox = if (mbToken.isNotBlank() && online()) (try { mapboxAlong(kind, line) } catch (e: Exception) { emptyList() }) else emptyList()
-                        val raw = fromMapbox.ifEmpty { Overpass.nearbyAlong(kind, line, if (kind == "services") 400 else 900) }
-                        raw.mapNotNull { n ->
+                        val fromMapbox = if (mbToken.isNotBlank() && online() && !wantPlugs && !late) (try { mapboxAlong(kind, line) } catch (e: Exception) { emptyList() }) else emptyList()
+                        // (charging: OpenStreetMap still answers along the route, sockets included, so the list isn't empty on a
+                        // phone that hasn't downloaded the chargers pack)
+                        val raw = fromMapbox.ifEmpty {
+                            Overpass.nearbyAlong(kind, line, if (kind == "services") 400 else 900)
+                        }
+                        val projected = raw.mapNotNull { n ->
                             val pr = RouteExtras.project(rt, n.place.pos, 1200.0, progress) ?: return@mapNotNull null
                             if (pr.first < progress - 100) null else n.copy(dist = pr.first - progress, detourMin = detour(pr.second), ahead = true)
                         }
-                    } else Overpass.nearby(kind, centre, radius).map { it.copy(dist = Geo.dist(origin, it.place.pos)) }
+                        if (projected.isNotEmpty()) return@async projected
+                    } else if (!charging) {
+                        return@async Overpass.nearby(kind, centre, radius).map { it.copy(dist = Geo.dist(origin, it.place.pos)) }
+                    }
+                    val saved = savedChargers()
+                    // (a charger list must be the ones ahead: falling back to the ones around you here would answer a question
+                    // nobody asked, which is what made "+ Charger" look like a nearby search)
+                    if (charging) return@async if (Plugs.resultQuality(saved, picked) >= Plugs.resultQuality(providerResults, picked)) saved else providerResults
+                    if (Plugs.resultQuality(saved, picked) > Plugs.resultQuality(providerResults, picked)) saved else providerResults
                 }
                 val list = kotlinx.coroutines.withTimeoutOrNull(30_000L) { work.await() }
                 if (list == null) { work.cancel(); toast(L.t("Search took too long. Check the signal and try again."), 4000); clearNearby(); return@launch }
                 if (pickBest) {
                     val ahead = list.filter { it.ahead || route == null }
-                    val best = if (ahead.any { it.price != null }) ahead.filter { it.price != null && it.detourMin in 0..10 }.minByOrNull { (it.price ?: 999.0) + it.detourMin }
+                    val best = if (kind == "charging") {
+                        // (charging late: furthest charger that still leaves 15–25% on arrival; the list is in route order)
+                        val picked = Plugs.picked(prefs)
+                        if (lateCharge()) Plugs.latestStop(ahead.asSequence(), picked, prefs.i(PreferenceKeys.EV_CHARGE_PCT, 80).coerceIn(1, 100).toDouble(), evKwhPerKm(), evBatteryKwh())
+                        else Plugs.bestStop(ahead.asSequence(), picked)
+                    }
+                        else if (ahead.any { it.price != null }) ahead.filter { it.price != null && it.detourMin in 0..10 }.minByOrNull { (it.price ?: 999.0) + it.detourMin }
                         else ahead.filter { it.detourMin >= 0 }.minByOrNull { it.detourMin * 1000.0 + it.dist / 100.0 } ?: ahead.minByOrNull { it.dist }
                     nearbyBusy = false
-                    if (best == null) { toast(L.t("Nothing found along the route ahead"), 3000); clearNearby() }
+                    if (best == null) {
+                        toast(L.t("Nothing found along the route ahead"), 3000)
+                        if (chargerPacks().none { OfflineChargers.installed(ctx, it) })
+                            toast(L.t("No chargers found ahead: download the chargers pack for this region in Settings › Offline maps"), 6000)
+                        clearNearby()
+                    }
                     else { clearNearby(); addStop(best.place) }
                     return@launch
                 }
-                nearby = sortNearby(list).take(15)
+                // (the connectors picked in Settings come first, then the distance decides, then the list is cut: filtering after the cut
+                // would drop a matching charger that happened to be the sixteenth)
+                nearby = chargerFilter(kind, sortNearby(list)).take(15)
                 if (kind == "charging") fillChargerAvailability()
-                if (nearby.isEmpty()) toast(if (alongRoute) "Nothing found along the route ahead" else "Nothing found nearby", 3000)
+                // (the chargers pack is what holds the connectors, and without it the list can only come from what's online)
+                val noPack = kind == "charging" && chargerPacks().none { OfflineChargers.installed(ctx, it) }
+                if (nearby.isEmpty()) toast(if (alongRoute) L.t("Nothing found along the route ahead") else L.t("Nothing found nearby"), 3000)
+                if (nearby.isEmpty() && noPack)
+                    toast(L.t("No chargers found ahead: download the chargers pack for this region in Settings › Offline maps"), 6000)
             } catch (e: Exception) { toast(searchFailText(e), 4500) }
             finally { nearbyBusy = false }
         }
@@ -3984,8 +4103,41 @@ class NavEngine(private val ctx: Context, val prefs: Prefs, val map: MapBinding)
     /** Rough extra minutes to call somewhere [off] metres from the route: there and back at town speed, plus a minute. */
     private fun detour(off: Double): Int = Math.round((2.0 * off / 11.0 + 60.0) / 60.0).toInt()
 
+    /**
+     * The order the list is shown in: price first for fuel when asked, and for chargers [latestOrder] when "Latest" is picked
+     * ([EV_LATE_CHARGE] still decides whether the automatic stop stops late).
+     */
     private fun sortNearby(l: List<Nearby>): List<Nearby> =
-        if (nearbySort == "cheap" && l.any { it.price != null }) l.sortedWith(compareBy<Nearby> { it.price ?: 9999.0 }.thenBy { it.dist }) else l.sortedBy { it.dist }
+        if (nearbySort == "cheap" && l.any { it.price != null }) l.sortedWith(compareBy<Nearby> { it.price ?: 9999.0 }.thenBy { it.dist })
+        else if (nearbySort == "late") latestOrder(l)
+        else l.sortedBy { it.dist }
+
+    /**
+     * The chargers in the order a driver charging as late as possible wants them: the ones that leave 15–25% on arrival first,
+     * the furthest ahead of those leading (that is the point of charging late), then the ones past the band, then the ones before
+     * it. One with [Nearby.detourMin] not known has no place in this order: it is left out, as everywhere else.
+     */
+    private fun latestOrder(l: List<Nearby>): List<Nearby> {
+        val startPct = prefs.i(PreferenceKeys.EV_CHARGE_PCT, 80).coerceIn(1, 100).toDouble()
+        val cons = evKwhPerKm(); val batt = evBatteryKwh()
+        return l.filter { it.detourMin >= 0 }.sortedWith(
+            compareBy<Nearby> { val pct = Plugs.pctOnArrival(it.dist, startPct, cons, batt); if (pct < Plugs.ARRIVE_LOW_PCT) 1 else if (pct > Plugs.ARRIVE_HIGH_PCT) 2 else 0 }
+                .thenByDescending { it.dist })
+    }
+
+    /**
+     * The chargers with the connectors picked in Settings first, then the ones whose connectors nobody mapped (kept: they're worth a
+     * look, and dropping them would claim there are none), then the rest; by distance inside each group, as the list arrives sorted.
+     * Every other kind of place is left alone.
+     */
+    private fun chargerFilter(kind: String?, l: List<Nearby>): List<Nearby> {
+        if (kind != "charging") return l
+        val picked = Plugs.picked(prefs)
+        if (picked.isEmpty()) return l
+        // (sorted, so the partition keeps each group in distance order)
+        val (sure, unknown) = l.partition { Plugs.matchQuality(it.plugs, picked) == 2 }
+        return sure + unknown.filter { Plugs.matchQuality(it.plugs, picked) != 0 }
+    }
 
     /**
      * Live availability for the chargers in the list ("8 of 12 free"), asked of TomTom for the first 10 that have it, all at once in
@@ -4004,7 +4156,24 @@ class NavEngine(private val ctx: Context, val prefs: Prefs, val map: MapBinding)
         }
     }
 
-    fun changeNearbySort(mode: String) { nearbySort = mode; nearby = sortNearby(nearby) }
+    fun changeNearbySort(mode: String) { nearbySort = mode; nearby = chargerFilter(nearbyKind, sortNearby(nearby)) }
+
+    /** How far ahead the charger list reaches, in metres: to where the battery would be down to 0%, within a sane limit. */
+    private fun lateReach(): Double {
+        val full = prefs.i(PreferenceKeys.EV_CHARGE_PCT, 80).coerceIn(1, 100) / 100.0 * evBatteryKwh() / evKwhPerKm() * 1000.0
+        return minOf(200_000.0, max(60_000.0, full))
+    }
+
+    /**
+     * "Latest" picked in the charger list: the list is searched again, because chargers that fit 15–25% on arrival are further
+     * ahead than the 60 km a soonest search looks at. Doing nothing while it already is leads the list is left alone.
+     */
+    fun chooseChargerOrder(late: Boolean) {
+        val mode = if (late) "late" else "near"
+        if (nearbySort == mode) return
+        changeNearbySort(mode)
+        if (late && nearbyKind == "charging" && route != null) loadNearby("charging", false)
+    }
 
     /** A destination shared from another app: routes straight to coordinates, or puts text in the search box. */
     fun openShared(t: SharedTarget) {
@@ -5317,7 +5486,17 @@ class NavEngine(private val ctx: Context, val prefs: Prefs, val map: MapBinding)
             val dropped = place.name == "Dropped pin" || place.name == L.t("Dropped pin")
             val infoJob = async(Dispatchers.IO) { try { if (token.isNotBlank() && online()) MapboxRest.whatsHere(token, p) else null } catch (e: Exception) { null } }
             val limJob = async(Dispatchers.IO) { try { Overpass.speedLimit(p) } catch (e: Exception) { null } }
-            val detJob = async(Dispatchers.IO) { try { if (online()) PlaceInfo.lookup(p, if (dropped) "" else place.name) else null } catch (e: Exception) { null } }
+            val knownCharger = nearby.takeIf { nearbyKind == "charging" }?.firstOrNull { it.place == place }
+            val packs = chargerPacks()
+            val detJob = async(Dispatchers.IO) {
+                val charger = knownCharger ?: try {
+                    packs.firstNotNullOfOrNull { pack ->
+                        OfflineChargers.near(ctx, p, 70, pack).firstOrNull { dropped || it.place.name.equals(place.name, ignoreCase = true) }
+                    }
+                } catch (e: IOException) { null }
+                if (charger != null) PlaceDetails("charging", "", "", "", "", charger.plugs)
+                else try { if (online()) PlaceInfo.lookup(p, if (dropped) "" else place.name) else null } catch (e: Exception) { null }
+            }
             val etaJob = async(Dispatchers.IO) { try { previewEta(p) } catch (e: Exception) { -1.0 } }
             val info = infoJob.await(); val lim = limJob.await()
             fun card(det: PlaceDetails?, eta: Double, price: String) = HereCard(
@@ -6862,6 +7041,9 @@ class NavEngine(private val ctx: Context, val prefs: Prefs, val map: MapBinding)
     // ---- electric cars: battery estimate ----
     val isEv: Boolean get() = prefs.s(PreferenceKeys.FUEL_TYPE, "E10") == "EV"
     /** Usable battery (kWh), from Settings > Fuel (60 if not set). */
+    /** Charge as late as the battery safely allows (Settings › Fuel & charging › Your electric car) rather than at the shortest detour. */
+    private fun lateCharge(): Boolean = prefs.b(PreferenceKeys.EV_LATE_CHARGE, false)
+
     private fun evBatteryKwh(): Double = (prefs.s(PreferenceKeys.EV_BATTERY_KWH, "").toDoubleOrNull() ?: 60.0).coerceIn(10.0, 200.0)
     /** kWh used per km: from the efficiency in Settings > Fuel (miles per kWh), or a typical 0.18. */
     private fun evKwhPerKm(): Double = prefs.s(PreferenceKeys.EVMPK, "").toDoubleOrNull()?.takeIf { it in 1.0..8.0 }?.let { 1.0 / (it * 1.609344) } ?: 0.18
@@ -6877,22 +7059,41 @@ class NavEngine(private val ctx: Context, val prefs: Prefs, val map: MapBinding)
         return Math.round(start - usedPct).toInt().coerceIn(-50, 100)
     }
 
-    /** The battery level or the charge to arrive with changed on the route options: look again for a charging stop. */
-    fun refreshEvPlan() { val r = route ?: return; fuelSuggestion = null; suggestFuel(r) }
+    private var fuelSuggestionJob: Job? = null
+
+    /** Look again when the battery or connector settings change. Don't let an older lookup replace the new stop. */
+    fun refreshEvPlan() {
+        fuelSuggestionJob?.cancel()
+        fuelSuggestion = null
+        if (prefs.b(PreferenceKeys.SMARTFUEL, true)) route?.let(::suggestFuel)
+    }
 
     private fun suggestFuel(r: Route) {
+        fuelSuggestionJob?.cancel()
         val fuel = prefs.s(PreferenceKeys.FUEL_TYPE, "E10")
         if (fuel != "EV" && r.len < 150_000) return
         var a = r.len * 0.35; var b = r.len * 0.75
         // electric: a charger before the battery gets down to the charge you want to keep (Settings > Fuel), with the shortest
         // detour, and how much you'll have when you get there. Only when the trip needs one.
         if (fuel == "EV") {
+            // (the settings this stop comes from: a lookup started before one of them changed mustn't put its stop back)
             val cons = evKwhPerKm(); val batt = evBatteryKwh()
             val startPct = prefs.i(PreferenceKeys.EV_CHARGE_PCT, 80).coerceIn(1, 100); val minPct = prefs.i(PreferenceKeys.EV_MIN_ARRIVE, 20).coerceIn(0, 60)
-            val rangeM = max(0.0, (startPct - minPct) / 100.0 * batt / cons * 1000.0)
-            if (r.len <= rangeM) { fuelSuggestion = null; return }
-            a = max(5_000.0, rangeM * 0.5); b = max(a + 5_000.0, rangeM * 0.92)
-            scope.launch {
+            // (charging late means reaching a charger at 15–25%; otherwise the shortest detour wins)
+            val late = lateCharge()
+            val picked = Plugs.picked(prefs)
+            fun stillTheSame(): Boolean =
+                cons == evKwhPerKm() && batt == evBatteryKwh() && startPct == prefs.i(PreferenceKeys.EV_CHARGE_PCT, 80).coerceIn(1, 100) &&
+                    minPct == prefs.i(PreferenceKeys.EV_MIN_ARRIVE, 20).coerceIn(0, 60) && picked == Plugs.picked(prefs) && late == lateCharge()
+            // (how far the charge takes you, and how far it takes you before the battery is down to what you want to arrive with)
+            val rangeM = max(0.0, startPct / 100.0 * batt / cons * 1000.0)
+            val mustStop = max(0.0, (startPct - minPct) / 100.0 * batt / cons * 1000.0)
+            if (r.len <= mustStop) { fuelSuggestion = null; return }
+            // (the search window: from a third of the charge to its end when charging late, from half to 92% otherwise; the
+            // ranking below decides where in it the stop goes)
+            a = minOf(mustStop, max(5_000.0, rangeM * if (late) 0.35 else 0.5))
+            b = minOf(r.len, max(a + 5_000.0, if (late) rangeM * 0.98 else rangeM * 0.92))
+            fuelSuggestionJob = scope.launch {
                 val best = withContext(Dispatchers.IO) {
                     try {
                         val out = ArrayList<Nearby>()
@@ -6905,14 +7106,12 @@ class NavEngine(private val ctx: Context, val prefs: Prefs, val map: MapBinding)
                                 }
                             } catch (e: Exception) { }
                         }
-                        if (out.isEmpty() && online()) {
-                            val line = RouteExtras.line(r, a, b, 1500.0, 45)
-                            for (n in Overpass.nearbyAlong("charging", line, 900)) {
-                                val pr = RouteExtras.project(r, n.place.pos, 1200.0) ?: continue
-                                if (pr.first in a..b) out += n.copy(dist = pr.first, detourMin = detour(pr.second), ahead = true)
-                            }
-                        }
-                        out.filter { it.detourMin >= 0 }.minByOrNull { it.detourMin }?.let { n ->
+                        // the area in use as well as the one picked to add: either can hold the chargers along this leg
+                        for (pack in chargerPacks()) out += try {
+                            OfflineChargers.nearRoute(ctx, r, a, b - a, 0.0, pack, ::detour).filter { it.dist >= 0 }.map { it.copy(dist = it.dist + a) }
+                        } catch (e: IOException) { emptyList() }
+                        val usable = out.asSequence().filter { it.detourMin >= 0 }
+                        (if (late) Plugs.latestStop(usable, picked, startPct.toDouble(), cons, batt) else Plugs.bestStop(usable, picked))?.let { n ->
                             val arr = Math.round(startPct - n.dist / 1000.0 * cons / batt * 100.0).toInt().coerceAtLeast(0)
                             val mins = Math.round((80 - arr).coerceAtLeast(10) / 100.0 * batt / 50.0 * 60.0).toInt()
                             // how many are free there now, where the operator shares it
@@ -6921,11 +7120,11 @@ class NavEngine(private val ctx: Context, val prefs: Prefs, val map: MapBinding)
                         }
                     } catch (e: Exception) { null }
                 }
-                if (route === r) fuelSuggestion = best
+                if (route === r && stillTheSame()) fuelSuggestion = best
             }
             return
         }
-        scope.launch {
+        fuelSuggestionJob = scope.launch {
             val best = withContext(Dispatchers.IO) {
                 try {
                     val out = ArrayList<Nearby>()
@@ -7023,7 +7222,7 @@ class NavEngine(private val ctx: Context, val prefs: Prefs, val map: MapBinding)
             has("parking", "car park", "somewhere to park") -> "parking"; else -> null
         }
         if (kind != null && has("find", "nearest", "look for", "search for", "where", "any ", "need", "show", "cheap", "stop for", "add a stop", "add stop", "near")) {
-            nearbySort = if (has("cheap")) "cheap" else "near"
+            nearbySort = when { has("cheap") -> "cheap"; has("latest", "charge late", "as late") -> "late"; else -> "near" }
             if (has("stop") && route != null) stopMode = true
             loadNearby(kind, has("destination", "when i get there"))
             val what = L.t(Overpass.kindLabel(kind)).let { if (L.en) it.lowercase() else it }
