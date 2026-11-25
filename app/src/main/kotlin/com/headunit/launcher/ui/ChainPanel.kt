@@ -146,10 +146,10 @@ internal fun ChainPanel(engine: NavEngine, modifier: Modifier) {
                 Icon(Icons.Rounded.Close, L.t("Close"), tint = c.text)
             }
         }
-        // the order: Quickest (drive time now), Nearest, On my route (while driving somewhere)
-        // (adding a stop: least detour, soonest along the way, and for chargers latest: 15–25% of the battery left on arrival)
+        // the order while adding a stop: least detour, soonest along the way, and for chargers latest (15–25% of the battery left on
+        // arrival); elsewhere: Quickest (drive time now), Nearest, On my route (while driving somewhere)
         val sorts = if (view.forStop) listOfNotNull("route" to L.t("Least detour"), if (view.spots.any { it.price != null }) "cheap" to L.t("Cheapest") else null,
-            "soon" to L.t("Soonest"), "near" to L.t("Nearest"),
+            "soon" to L.t("Soonest"),
             if (engine.chainQuery == "EV charging station") "late" to L.t("Latest") else null) else buildList {
             if (view.spots.any { it.secs >= 0 }) add("quick" to L.t("Quickest"))
             add("near" to L.t("Nearest"))
