@@ -642,8 +642,22 @@ jobs:
           [ -n "$FILES" ] || { echo "Nothing to publish"; exit 1; }
           # (in "extras only" mode just the speed limit and camera files are here: the rest of the release is left as it is)
           ls -l $FILES
-          gh release upload "${{ matrix.area.tag }}" $FILES --repo "${{ github.repository }}" --clobber
-          echo "Download address: https://github.com/${{ github.repository }}/releases/download/${{ matrix.area.tag }}"
+          # The three jobs of an area (routing, map, lists) publish here at the same moment, and GitHub takes only one upload per
+          # release at a time: the others come back 422 "temporarily unavailable", so they wait a little and try again.
+          REL="${{ matrix.area.tag }}"
+          uploaded=""
+          for try in 1 2 3 4 5 6; do
+            if gh release upload "$REL" $FILES --repo "${{ github.repository }}" --clobber; then uploaded=1; break; fi
+            left=""
+            have=$(gh release view "$REL" --repo "${{ github.repository }}" --json assets --jq '.assets[].name' 2>/dev/null || true)
+            for f in $FILES; do echo "$have" | grep -qx "$(basename "$f")" || left="$left $f"; done
+            [ -n "$left" ] && FILES="$left"
+            [ -z "$FILES" ] && { uploaded=1; break; }   # another job's upload of the same generation already put them there
+            echo "Upload refused (try $try): retrying$FILES in $(( 15 * try ))s"
+            sleep $(( 15 * try ))
+          done
+          [ -n "$uploaded" ] || { echo "Couldn't upload$FILES to $REL"; exit 1; }
+          echo "Download address: https://github.com/${{ github.repository }}/releases/download/$REL"
 
   build2:
     needs: [plan, sources]
@@ -1155,8 +1169,22 @@ jobs:
           [ -n "$FILES" ] || { echo "Nothing to publish"; exit 1; }
           # (in "extras only" mode just the speed limit and camera files are here: the rest of the release is left as it is)
           ls -l $FILES
-          gh release upload "${{ matrix.area.tag }}" $FILES --repo "${{ github.repository }}" --clobber
-          echo "Download address: https://github.com/${{ github.repository }}/releases/download/${{ matrix.area.tag }}"
+          # The three jobs of an area (routing, map, lists) publish here at the same moment, and GitHub takes only one upload per
+          # release at a time: the others come back 422 "temporarily unavailable", so they wait a little and try again.
+          REL="${{ matrix.area.tag }}"
+          uploaded=""
+          for try in 1 2 3 4 5 6; do
+            if gh release upload "$REL" $FILES --repo "${{ github.repository }}" --clobber; then uploaded=1; break; fi
+            left=""
+            have=$(gh release view "$REL" --repo "${{ github.repository }}" --json assets --jq '.assets[].name' 2>/dev/null || true)
+            for f in $FILES; do echo "$have" | grep -qx "$(basename "$f")" || left="$left $f"; done
+            [ -n "$left" ] && FILES="$left"
+            [ -z "$FILES" ] && { uploaded=1; break; }   # another job's upload of the same generation already put them there
+            echo "Upload refused (try $try): retrying$FILES in $(( 15 * try ))s"
+            sleep $(( 15 * try ))
+          done
+          [ -n "$uploaded" ] || { echo "Couldn't upload$FILES to $REL"; exit 1; }
+          echo "Download address: https://github.com/${{ github.repository }}/releases/download/$REL"
 
   build3:
     needs: [plan, sources]
@@ -1668,8 +1696,22 @@ jobs:
           [ -n "$FILES" ] || { echo "Nothing to publish"; exit 1; }
           # (in "extras only" mode just the speed limit and camera files are here: the rest of the release is left as it is)
           ls -l $FILES
-          gh release upload "${{ matrix.area.tag }}" $FILES --repo "${{ github.repository }}" --clobber
-          echo "Download address: https://github.com/${{ github.repository }}/releases/download/${{ matrix.area.tag }}"
+          # The three jobs of an area (routing, map, lists) publish here at the same moment, and GitHub takes only one upload per
+          # release at a time: the others come back 422 "temporarily unavailable", so they wait a little and try again.
+          REL="${{ matrix.area.tag }}"
+          uploaded=""
+          for try in 1 2 3 4 5 6; do
+            if gh release upload "$REL" $FILES --repo "${{ github.repository }}" --clobber; then uploaded=1; break; fi
+            left=""
+            have=$(gh release view "$REL" --repo "${{ github.repository }}" --json assets --jq '.assets[].name' 2>/dev/null || true)
+            for f in $FILES; do echo "$have" | grep -qx "$(basename "$f")" || left="$left $f"; done
+            [ -n "$left" ] && FILES="$left"
+            [ -z "$FILES" ] && { uploaded=1; break; }   # another job's upload of the same generation already put them there
+            echo "Upload refused (try $try): retrying$FILES in $(( 15 * try ))s"
+            sleep $(( 15 * try ))
+          done
+          [ -n "$uploaded" ] || { echo "Couldn't upload$FILES to $REL"; exit 1; }
+          echo "Download address: https://github.com/${{ github.repository }}/releases/download/$REL"
 
   build4:
     needs: [plan, sources]
@@ -2181,5 +2223,19 @@ jobs:
           [ -n "$FILES" ] || { echo "Nothing to publish"; exit 1; }
           # (in "extras only" mode just the speed limit and camera files are here: the rest of the release is left as it is)
           ls -l $FILES
-          gh release upload "${{ matrix.area.tag }}" $FILES --repo "${{ github.repository }}" --clobber
-          echo "Download address: https://github.com/${{ github.repository }}/releases/download/${{ matrix.area.tag }}"
+          # The three jobs of an area (routing, map, lists) publish here at the same moment, and GitHub takes only one upload per
+          # release at a time: the others come back 422 "temporarily unavailable", so they wait a little and try again.
+          REL="${{ matrix.area.tag }}"
+          uploaded=""
+          for try in 1 2 3 4 5 6; do
+            if gh release upload "$REL" $FILES --repo "${{ github.repository }}" --clobber; then uploaded=1; break; fi
+            left=""
+            have=$(gh release view "$REL" --repo "${{ github.repository }}" --json assets --jq '.assets[].name' 2>/dev/null || true)
+            for f in $FILES; do echo "$have" | grep -qx "$(basename "$f")" || left="$left $f"; done
+            [ -n "$left" ] && FILES="$left"
+            [ -z "$FILES" ] && { uploaded=1; break; }   # another job's upload of the same generation already put them there
+            echo "Upload refused (try $try): retrying$FILES in $(( 15 * try ))s"
+            sleep $(( 15 * try ))
+          done
+          [ -n "$uploaded" ] || { echo "Couldn't upload$FILES to $REL"; exit 1; }
+          echo "Download address: https://github.com/${{ github.repository }}/releases/download/$REL"
