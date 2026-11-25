@@ -2364,7 +2364,7 @@ class NavEngine(private val ctx: Context, val prefs: Prefs, val map: MapBinding)
             if (spots.isEmpty()) { chainBusy = false; toast(L.t("Nothing found along the route ahead"), 3000); return@launch }
             withContext(Dispatchers.IO) { spots.mapNotNull { Logos.domainFor(it.place) }.distinct().take(6).forEach { Logos.load(ctx, it) } }
             val domain = spots.asSequence().mapNotNull { Logos.domainFor(it.place) }.firstOrNull()
-            chainGuard = if (chargerList && noPack) L.t("Connectors come from the chargers pack: download it in Settings › Offline maps to filter by your plugs") else ""
+            chainGuard = if (chargerList && noPack) L.t("Connector types for each charger need a chargers pack. Download it in Settings › Offline maps to filter by plug type") else ""
             val n = spots.first().place.name
             chain = ChainView(title ?: if (Logos.norm(n).startsWith(Logos.norm(q)) && n.length <= q.length + 14) n else q.replaceFirstChar { it.uppercase() },
                 domain, spots, 0, from, forStop = true)
