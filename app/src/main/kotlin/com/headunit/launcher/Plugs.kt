@@ -38,6 +38,27 @@ object Plugs {
     fun picked(prefs: Prefs): Set<String> =
         prefs.s(PreferenceKeys.EV_PLUGS, "").split('|').mapNotNull { of(it) }.toSet()
 
+    /**
+     * How many sockets of that connector an OpenStreetMap charger has from its socket value: "1", "2"… and "yes" all count as
+     * one, while "no" and "0" mean it hasn't got that plug (the same rule the country pack build applies).
+     */
+    internal fun socketCount(value: String): Int {
+        val v = value.trim()
+        if (v.isEmpty() || v.equals("no", true) || v == "0") return 0
+        return v.toIntOrNull() ?: 1
+    }
+
+    /**
+     * The connectors an OpenStreetMap charger carries, from its socket tags ("socket:type2_combo" is "CCS"), in [ALL]'s order and
+     * once each. Empty when nobody mapped them, which the caller keeps as "connectors unknown" rather than "none of yours".
+     */
+    fun sockets(tags: Map<String, String>): List<String> = ALL.filter { plug ->
+        tags.any { (key, value) ->
+            // ("socket:type2:output" and "socket:type2:current" describe a socket, they are not one)
+            key.startsWith("socket:") && key.count { it == ':' } == 1 && socketCount(value) > 0 && of(key.substringAfter(':')) == plug
+        }
+    }
+
     /** [picked] as a saved preference value. */
     internal fun save(picked: Set<String>): String = ALL.filter { it in picked }.joinToString("|")
 

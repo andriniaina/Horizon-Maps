@@ -516,6 +516,7 @@ object Overpass {
         "food" -> "[\"amenity\"~\"^(restaurant|fast_food)$\"]"
         "coffee" -> "[\"amenity\"=\"cafe\"]"
         "toilets" -> "[\"amenity\"=\"toilets\"]"
+        "charging" -> "[\"amenity\"=\"charging_station\"]"
         "services" -> "[\"highway\"~\"^(services|rest_area)$\"]"
         else -> "[\"amenity\"=\"parking\"]"
     }
@@ -594,6 +595,13 @@ object Overpass {
                     tags.optString("cuisine").takeIf { it.isNotBlank() }?.let { extra += it.replace("_", " ").replace(";", ", ") }
                     tags.optString("opening_hours").takeIf { it.isNotBlank() }?.let { extra += it }
                 }
+                "charging" -> {
+                    // (with no pack downloaded these are the chargers on offer: their connectors come from the socket tags)
+                    val kw = tags.optString("charging_station:output").trim().filter { it.isDigit() || it == '.' }.toDoubleOrNull()?.toInt() ?: 0
+                    if (kw > 0) extra += "$kw kW"
+                    tags.optString("capacity").takeIf { it.isNotBlank() }?.let { extra += "$it points" }
+                    Plugs.sockets(tagMap(tags)).takeIf { it.isNotEmpty() }?.let { extra += it.take(3).joinToString(", ") }
+                }
                 "toilets" -> {
                     when (tags.optString("fee")) { "yes" -> extra += "Paid"; "no" -> extra += "Free" }
                     if (tags.optString("wheelchair") == "yes") extra += "Accessible"
@@ -602,8 +610,14 @@ object Overpass {
                     tags.optString("operator").takeIf { it.isNotBlank() && it != name }?.let { extra += it }
                 }
             }
-            out += Nearby(Place(name, tags.optString("addr:street"), pos), Geo.dist(c, pos), extra.joinToString(" · "))
+            out += Nearby(Place(name, tags.optString("addr:street"), pos), Geo.dist(c, pos), extra.joinToString(" · "), plugs = if (kind == "charging") Plugs.sockets(tagMap(tags)) else emptyList())
         }
+        return out
+    }
+
+    private fun tagMap(tags: JSONObject): Map<String, String> {
+        val out = HashMap<String, String>(tags.length())
+        for (k in tags.keys()) out[k] = tags.optString(k)
         return out
     }
 }

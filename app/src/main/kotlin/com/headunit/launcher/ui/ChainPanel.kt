@@ -147,9 +147,10 @@ internal fun ChainPanel(engine: NavEngine, modifier: Modifier) {
             }
         }
         // the order: Quickest (drive time now), Nearest, On my route (while driving somewhere)
-        // (adding a stop: least detour, soonest along the way, nearest to you)
+        // (adding a stop: least detour, soonest along the way, and for chargers latest: 15–25% of the battery left on arrival)
         val sorts = if (view.forStop) listOfNotNull("route" to L.t("Least detour"), if (view.spots.any { it.price != null }) "cheap" to L.t("Cheapest") else null,
-            "soon" to L.t("Soonest"), "near" to L.t("Nearest")) else buildList {
+            "soon" to L.t("Soonest"), "near" to L.t("Nearest"),
+            if (engine.chainQuery == "EV charging station") "late" to L.t("Latest") else null) else buildList {
             if (view.spots.any { it.secs >= 0 }) add("quick" to L.t("Quickest"))
             add("near" to L.t("Nearest"))
             if (view.spots.any { it.detour >= 0 }) add("route" to L.t("On my route"))
@@ -164,6 +165,7 @@ internal fun ChainPanel(engine: NavEngine, modifier: Modifier) {
             }
         }
         val list = engine.chainSorted()
+        if (engine.chainGuard.isNotBlank()) Text(engine.chainGuard, color = c.sub, fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp))
         // the cheapest price on the list, shown in green
         val low = view.spots.mapNotNull { it.price }.minOrNull()
         LazyColumn(Modifier.padding(top = 10.dp).fillMaxWidth().weight(1f, fill = false)) {

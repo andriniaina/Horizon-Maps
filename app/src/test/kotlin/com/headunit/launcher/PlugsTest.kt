@@ -107,6 +107,24 @@ class PlugsTest {
     private fun stopAt(km: Double, plugs: List<String> = listOf("CCS"), detour: Int = 3) =
         Nearby(Place("at $km km", "", LL(0.0, 0.0)), km * 1000.0, "", detourMin = detour, ahead = true, plugs = plugs)
 
+    @Test fun theLateOrderPutsTheBandFirstThenGoesFurtherAhead() {
+        // from 80%: the band (15–25% left) is 55% to 65% of 300 km, so 165 km to 195 km along
+        val chargers = listOf(stopAt(10.0), stopAt(170.0), stopAt(230.0), stopAt(190.0), stopAt(120.0))
+        val ordered = offlineLatestOrder(chargers)
+        assertEquals(listOf("at 190.0 km", "at 170.0 km", "at 230.0 km", "at 120.0 km", "at 10.0 km"), ordered.map { it.place.name })
+    }
+
+    @Test fun theLateOrderLeavesOutAChargerWithNoKnownWayToReachIT() {
+        val chargers = listOf(stopAt(170.0), stopAt(180.0, detour = -1))
+        assertEquals(listOf("at 170.0 km"), offlineLatestOrder(chargers).map { it.place.name })
+    }
+
+    /** The same order [NavEngine.latestOrder] builds, on a plain list (the engine needs a Context). */
+    private fun offlineLatestOrder(l: List<Nearby>, startPct: Double = 80.0): List<Nearby> =
+        l.filter { it.detourMin >= 0 }.sortedWith(
+            compareBy<Nearby> { val pct = Plugs.pctOnArrival(it.dist, startPct, cons, batt); if (pct < Plugs.ARRIVE_LOW_PCT) 1 else if (pct > Plugs.ARRIVE_HIGH_PCT) 2 else 0 }
+                .thenByDescending { it.dist })
+
     @Test fun batteryOnArrivalComesFromTheCarsOwnFigures() {
         assertEquals(80.0, Plugs.pctOnArrival(0.0, 80.0, cons, batt), 1e-9)
         assertEquals(60.0, Plugs.pctOnArrival(60_000.0, 80.0, cons, batt), 1e-9)
@@ -177,5 +195,25 @@ class PlugsTest {
         assertEquals("CCS|Type 2", Plugs.save(setOf("Type 2", "CCS")))
         assertEquals("CCS", Plugs.save(setOf("CCS", "hydrogen")))
         assertEquals("", Plugs.save(emptySet()))
+    }
+
+    // ---- OpenStreetMap sockets (the chargers found online, with no pack downloaded)
+
+    @Test fun socketTagsBecomeTheAppsConnectorNames() {
+        val tags = mapOf("socket:type2_combo" to "2", "socket:type2" to "yes", "socket:chademo" to "1", "socket:schuko" to "no", "socket:bs1363" to "0")
+        // (the picker's order, once each; "no" and "0" say the charger hasn't got that plug)
+        assertEquals(listOf("CCS", "CHAdeMO", "Type 2"), Plugs.sockets(tags))
+    }
+
+    @Test fun socketOutputAndCurrentTagsAreNotSockets() {
+        val tags = mapOf("socket:type2:output" to "22 kW", "socket:type2:current" to "32", "socket:nacs" to "1")
+        assertEquals(listOf("NACS"), Plugs.sockets(tags))
+    }
+
+    @Test fun aChargerWithNoSocketTagsHasUnknownConnectors() {
+        // (kept as unknown rather than a mismatch: nobody mapped it, which is not the same as it not fitting)
+        assertEquals(emptyList<String>(), Plugs.sockets(emptyMap()))
+        assertEquals(emptyList<String>(), Plugs.sockets(mapOf("socket:type2" to "no")))
+        assertEquals(1, Plugs.matchQuality(emptyList(), setOf("CCS")))
     }
 }
